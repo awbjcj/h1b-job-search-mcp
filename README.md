@@ -123,7 +123,7 @@ Open http://localhost:3000 and connect to `http://localhost:8000/mcp` using "Str
 1. **Load the data**:
    ```
    Tool: load_h1b_data
-   Parameters: {"year": 2024, "quarter": 4}
+   Parameters: `{}` to discover and load the latest available period, or specify `year` and `quarter` explicitly.
    ```
 
 2. **Search for jobs**:

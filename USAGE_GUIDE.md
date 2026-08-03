@@ -16,7 +16,8 @@ The H-1B Job Search MCP understands natural language! Just tell it what you want
 
 Your AI will respond with:
 ```
-✅ Successfully loaded 100,000 H-1B records from 2024 Q4
+✅ Successfully loaded the latest available H-1B disclosure period
+📅 The response includes the exact fiscal year and quarter that were loaded
 📊 Data cached for faster future searches
 💡 Ready to search! Try: "Find software engineer jobs in California"
 ```
@@ -248,6 +249,7 @@ Always check:
 - Location (city and state)
 - Wage information (when available)
 - Contact information (when available)
+- Company statistics calculated across all loaded positions for that employer
 
 **For Company Statistics:**
 - Total H-1B applications
