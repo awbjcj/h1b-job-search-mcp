@@ -251,6 +251,28 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(server.data_manager.is_loaded())
 
+    def test_latest_startup_falls_back_when_newest_period_is_unavailable(self) -> None:
+        manager = server.H1BDataManager()
+
+        with patch.object(
+            manager,
+            "discover_latest_period",
+            return_value=(2026, 2),
+        ), patch.object(manager, "load_data", side_effect=[False, True]) as load_data:
+            loaded = manager.load_latest_data()
+
+        self.assertTrue(loaded)
+        self.assertEqual(load_data.call_args_list[0].args, (2026, 2))
+        self.assertEqual(load_data.call_args_list[1].args, (2026, 1))
+
+    def test_http_startup_stays_live_when_data_is_unavailable(self) -> None:
+        with TestClient(server.mcp.http_app()) as client:
+            response = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "degraded")
+        self.assertFalse(server.data_manager.is_loaded())
+
 
 if __name__ == "__main__":
     unittest.main()

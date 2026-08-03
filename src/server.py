@@ -176,19 +176,36 @@ class H1BDataManager:
                 f"period could not be discovered: FY{latest_period[0]} Q{latest_period[1]}"
             )
 
-        year, quarter = latest_period
-        if self.load_data(year, quarter, force_download):
-            return True
-
-        # Keep the server usable if a newly published file is temporarily
-        # unavailable and an older processed cache exists.
+        # The DOL performance page can list a file before the corresponding
+        # download URL is usable. Try the newest cached period first, then a
+        # few previous quarters so startup can use the newest valid data.
+        candidate_periods = [latest_period]
         cached_period = self.newest_cached_period()
-        if cached_period and cached_period != latest_period:
-            print(
-                "Falling back to the newest cached LCA period: "
-                f"FY{cached_period[0]} Q{cached_period[1]}"
-            )
-            return self.load_data(*cached_period)
+        if cached_period and cached_period not in candidate_periods:
+            candidate_periods.append(cached_period)
+
+        year, quarter = latest_period
+        for _ in range(4):
+            quarter -= 1
+            if quarter == 0:
+                year -= 1
+                quarter = 4
+            previous_period = (year, quarter)
+            if previous_period not in candidate_periods:
+                candidate_periods.append(previous_period)
+
+        for index, period in enumerate(candidate_periods):
+            if index > 0:
+                print(
+                    "Falling back to LCA period: "
+                    f"FY{period[0]} Q{period[1]}"
+                )
+            if self.load_data(
+                *period,
+                force_download=force_download if index == 0 else False,
+            ):
+                return True
+
         return False
 
     def load_data(
@@ -376,7 +393,10 @@ data_manager = H1BDataManager()
 async def server_lifespan(_server):
     loaded = await asyncio.to_thread(data_manager.ensure_loaded)
     if not loaded:
-        raise RuntimeError("H-1B disclosure data could not be loaded during startup")
+        print(
+            "H-1B disclosure data is unavailable at startup; continuing with "
+            "the server live so a later load can retry the DOL sources."
+        )
     yield {"data_manager": data_manager}
 
 
@@ -388,10 +408,10 @@ async def health_check(_request: Request) -> JSONResponse:
     ready = data_manager.is_loaded()
     return JSONResponse(
         {
-            "status": "ok" if ready else "loading",
+            "status": "ok" if ready else "degraded",
             "data_version": data_manager.period_label(),
         },
-        status_code=200 if ready else 503,
+        status_code=200,
     )
 
 @mcp.tool(
