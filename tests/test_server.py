@@ -54,12 +54,15 @@ class H1BServerTests(unittest.TestCase):
 
     def cache_default_disclosure(self, data: pd.DataFrame | None = None) -> None:
         disclosure = data if data is not None else disclosure_rows()
-        disclosure.to_pickle(Path(self._temp_dir.name) / "LCA_2024Q4.pkl")
+        self.cache_period(2024, 4, disclosure)
 
-    def cache_disclosure(self, year: int, quarter: int) -> None:
-        disclosure_rows().to_pickle(
+    def cache_period(self, year: int, quarter: int, data: pd.DataFrame) -> None:
+        data.to_pickle(
             Path(self._temp_dir.name) / f"LCA_{year}Q{quarter}.pkl"
         )
+
+    def cache_disclosure(self, year: int, quarter: int) -> None:
+        self.cache_period(year, quarter, disclosure_rows())
 
     def test_company_stats_loads_default_cache_on_first_read(self) -> None:
         self.cache_default_disclosure()
@@ -68,6 +71,60 @@ class H1BServerTests(unittest.TestCase):
 
         self.assertNotIn("error", result)
         self.assertEqual(result["total_applications"], 1)
+
+    def test_company_stats_falls_back_to_latest_matching_quarter(self) -> None:
+        self.cache_period(2026, 1, disclosure_rows())
+        self.cache_period(
+            2025,
+            4,
+            disclosure_rows().assign(
+                EMPLOYER_NAME="Woven by Toyota, U.S., Inc."
+            ),
+        )
+        self._discover_latest_period_mock.return_value = (2026, 1)
+
+        result = server.get_company_stats("WOVEN BY TOYOTA US INC")
+
+        self.assertEqual(result["company"], "Woven by Toyota, U.S., Inc.")
+        self.assertEqual(result["total_applications"], 1)
+        self.assertEqual(result["data_version"], "FY2025 Q4")
+        self.assertEqual(result["fiscal_periods"], ["FY2025 Q4"])
+        self.assertEqual(
+            result["searched_periods"],
+            ["FY2026 Q1", "FY2025 Q4"],
+        )
+        self.assertEqual(server.data_manager.period_label(), "FY2026 Q1")
+
+    def test_employer_normalization_handles_common_legal_name_forms(self) -> None:
+        self.assertEqual(
+            server._normalise_employer("Woven by Toyota, U.S., Inc."),
+            "wovenbytoyotaus",
+        )
+        self.assertEqual(
+            server._normalise_employer("WOVEN BY TOYOTA US INC"),
+            "wovenbytoyotaus",
+        )
+        self.assertEqual(
+            server._normalise_employer("The Example, L.L.C."),
+            "example",
+        )
+        self.assertEqual(
+            server._normalise_employer("Example Limited Liability Company"),
+            "example",
+        )
+
+    def test_company_stats_reports_no_recent_sponsorship_after_four_quarters(self) -> None:
+        for year, quarter in [(2026, 1), (2025, 4), (2025, 3), (2025, 2)]:
+            self.cache_period(year, quarter, disclosure_rows())
+        self._discover_latest_period_mock.return_value = (2026, 1)
+
+        result = server.get_company_stats("WOVEN BY TOYOTA US INC")
+
+        self.assertIn("No recent sponsorship data", result["message"])
+        self.assertEqual(
+            result["searched_periods"],
+            ["FY2026 Q1", "FY2025 Q4", "FY2025 Q3", "FY2025 Q2"],
+        )
 
     def test_loaded_data_accessor_rejects_unloaded_manager(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "data is not loaded"):

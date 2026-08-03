@@ -5,9 +5,10 @@ import re
 import pandas as pd
 import requests
 import subprocess
+import unicodedata
 from contextlib import asynccontextmanager
 from io import StringIO
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional, cast
 from datetime import datetime
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -26,6 +27,59 @@ LCA_DISCLOSURE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LATEST_DISCOVERY_LOOKBACK_YEARS = 5
+RECENT_SPONSORSHIP_QUARTERS = 4
+
+# These forms occur frequently in the FY2026 Q1 employer data. Canonicalizing
+# dotted abbreviations before removing legal suffixes keeps names such as
+# "Woven by Toyota, U.S., Inc." and "WOVEN BY TOYOTA US INC" equivalent.
+_EMPLOYER_ABBREVIATIONS = (
+    (("p", "l", "l", "c"), "pllc"),
+    (("g", "m", "b", "h"), "gmbh"),
+    (("l", "l", "c"), "llc"),
+    (("l", "l", "p"), "llp"),
+    (("p", "l", "c"), "plc"),
+    (("u", "s", "a"), "usa"),
+    (("u", "s"), "us"),
+    (("n", "a"), "na"),
+    (("p", "c"), "pc"),
+    (("p", "a"), "pa"),
+    (("l", "p"), "lp"),
+    (("s", "a"), "sa"),
+    (("a", "g"), "ag"),
+    (("b", "v"), "bv"),
+    (("n", "v"), "nv"),
+)
+_EMPLOYER_LEGAL_SUFFIX_PHRASES = (
+    ("limited", "liability", "company"),
+    ("public", "benefit", "corporation"),
+    ("professional", "corporation"),
+)
+_EMPLOYER_LEGAL_SUFFIXES = frozenset(
+    {
+        "inc",
+        "incorporated",
+        "llc",
+        "llp",
+        "lp",
+        "pllc",
+        "plc",
+        "corp",
+        "corporation",
+        "co",
+        "company",
+        "ltd",
+        "limited",
+        "pc",
+        "pa",
+        "pbc",
+        "na",
+        "sa",
+        "ag",
+        "bv",
+        "nv",
+        "gmbh",
+    }
+)
 
 class H1BDataManager:
     def __init__(self):
@@ -381,6 +435,28 @@ class H1BDataManager:
             return None
         return f"FY{self.loaded_year} Q{self.loaded_quarter}"
 
+    def recent_periods(
+        self,
+        count: int = RECENT_SPONSORSHIP_QUARTERS,
+    ) -> list[tuple[int | None, int | None]]:
+        """Return the loaded fiscal period and its preceding quarters."""
+        if count < 1 or not self.is_loaded():
+            return []
+
+        if self.loaded_year is None or self.loaded_quarter is None:
+            return [(None, None)]
+
+        periods: list[tuple[int | None, int | None]] = []
+        year = self.loaded_year
+        quarter = self.loaded_quarter
+        for _ in range(count):
+            periods.append((year, quarter))
+            quarter -= 1
+            if quarter == 0:
+                year -= 1
+                quarter = 4
+        return periods
+
     def latest_period_label(self) -> str | None:
         if self.latest_available_year is None or self.latest_available_quarter is None:
             return None
@@ -469,10 +545,68 @@ def _get_employer_column(df: pd.DataFrame) -> str:
     raise KeyError("Loaded H-1B data has no employer column")
 
 
-def _normalise_employer(value: Any) -> str:
+def _employer_tokens(value: Any) -> list[str]:
     if pd.isna(value):
-        return ""
-    return " ".join(str(value).split()).casefold()
+        return []
+
+    text = unicodedata.normalize("NFKD", str(value)).casefold()
+    text = "".join(
+        character for character in text if not unicodedata.combining(character)
+    )
+    tokens = re.findall(r"[a-z0-9]+", text.replace("&", " and "))
+
+    canonical_tokens: list[str] = []
+    index = 0
+    while index < len(tokens):
+        for source, replacement in _EMPLOYER_ABBREVIATIONS:
+            if tuple(tokens[index : index + len(source)]) == source:
+                canonical_tokens.append(replacement)
+                index += len(source)
+                break
+        else:
+            canonical_tokens.append(tokens[index])
+            index += 1
+
+    return canonical_tokens
+
+
+def _normalise_employer(value: Any) -> str:
+    tokens = _employer_tokens(value)
+    if tokens and tokens[0] == "the":
+        tokens = tokens[1:]
+    original_tokens = tokens.copy()
+
+    while len(tokens) > 1:
+        removed_suffix = False
+        for suffix in _EMPLOYER_LEGAL_SUFFIX_PHRASES:
+            if len(tokens) > len(suffix) and tuple(tokens[-len(suffix) :]) == suffix:
+                del tokens[-len(suffix) :]
+                removed_suffix = True
+                break
+        if removed_suffix:
+            continue
+        if tokens[-1] in _EMPLOYER_LEGAL_SUFFIXES:
+            tokens.pop()
+            continue
+        break
+
+    if not tokens:
+        tokens = original_tokens
+    return "".join(tokens)
+
+
+def _filter_company_rows(
+    df: pd.DataFrame,
+    employer_col: str,
+    company_name: str,
+) -> pd.DataFrame:
+    company_key = _normalise_employer(company_name)
+    if not company_key:
+        return df.iloc[0:0]
+
+    employer_keys = df[employer_col].map(_normalise_employer)
+    match_mask = employer_keys.str.contains(company_key, regex=False, na=False)
+    return cast(pd.DataFrame, df.loc[match_mask])
 
 
 def _python_value(value: Any) -> Any:
@@ -483,10 +617,23 @@ def _python_value(value: Any) -> Any:
     return value
 
 
-def _build_company_stats(company_df: pd.DataFrame, employer_col: str) -> Dict:
+def _build_company_stats(
+    company_df: pd.DataFrame,
+    employer_col: str,
+    *,
+    period_label: str | None = None,
+    source_url: str | None = None,
+) -> Dict:
     """Calculate statistics across every loaded position for one company."""
     if company_df.empty:
         return {}
+
+    selected_period = (
+        period_label if period_label is not None else data_manager.period_label()
+    )
+    selected_source_url = (
+        source_url if source_url is not None else data_manager.source_url
+    )
 
     job_col = next(
         (column for column in ["JOB_TITLE", "SOC_TITLE", "JOB_TITLE_CLEAN"] if column in company_df.columns),
@@ -519,9 +666,9 @@ def _build_company_stats(company_df: pd.DataFrame, employer_col: str) -> Dict:
             if "CASE_STATUS" in company_df.columns
             else "N/A"
         ),
-        "fiscal_periods": [data_manager.period_label()],
-        "data_version": data_manager.period_label(),
-        "source_url": data_manager.source_url,
+        "fiscal_periods": [selected_period],
+        "data_version": selected_period,
+        "source_url": selected_source_url,
     }
 
     if isinstance(stats["certified"], int):
@@ -680,13 +827,13 @@ def search_h1b_jobs(
 
 @mcp.tool(
     description=(
-        "Get statistics about all loaded H-1B positions and applications for "
-        "a company."
+        "Get statistics about a company's latest H-1B sponsorship data, "
+        "searching the most recent four fiscal quarters."
     )
 )
 def get_company_stats(company_name: str) -> Dict:
     """
-    Get detailed H-1B sponsorship statistics for a specific company.
+    Get detailed H-1B sponsorship statistics for the latest matching quarter.
     
     Args:
         company_name: Company name to search for
@@ -696,16 +843,70 @@ def get_company_stats(company_name: str) -> Dict:
     """
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
-    
-    df = data_manager.get_loaded_data().copy()
 
-    employer_col = _get_employer_column(df)
-    df = df[df[employer_col].str.contains(company_name, case=False, na=False)]
-    
-    if len(df) == 0:
-        return {"message": f"No records found for {company_name}"}
-    
-    return _build_company_stats(df, employer_col)
+    original_df = data_manager.df
+    original_last_loaded = data_manager.last_loaded
+    original_current_file = data_manager.current_file
+    original_loaded_year = data_manager.loaded_year
+    original_loaded_quarter = data_manager.loaded_quarter
+    original_source_url = data_manager.source_url
+
+    periods = data_manager.recent_periods()
+    searched_periods: list[str] = []
+
+    try:
+        for year, quarter in periods:
+            if year is None or quarter is None:
+                period_label = data_manager.period_label()
+                display_period = period_label or "currently loaded data"
+                period_df = data_manager.get_loaded_data()
+            elif (year, quarter) == (original_loaded_year, original_loaded_quarter):
+                period_label = f"FY{year} Q{quarter}"
+                display_period = period_label
+                period_df = data_manager.get_loaded_data()
+            else:
+                period_label = f"FY{year} Q{quarter}"
+                display_period = period_label
+                if not data_manager.load_data(year, quarter):
+                    searched_periods.append(display_period)
+                    continue
+                period_df = data_manager.get_loaded_data()
+
+            searched_periods.append(display_period)
+            employer_col = _get_employer_column(period_df)
+            company_df = _filter_company_rows(
+                period_df,
+                employer_col,
+                company_name,
+            )
+            if company_df.empty:
+                continue
+
+            stats = _build_company_stats(
+                company_df.copy(),
+                employer_col,
+                period_label=period_label,
+                source_url=data_manager.source_url,
+            )
+            stats["searched_periods"] = searched_periods
+            stats["latest_sponsorship_period"] = period_label
+            return stats
+    finally:
+        data_manager.df = original_df
+        data_manager.last_loaded = original_last_loaded
+        data_manager.current_file = original_current_file
+        data_manager.loaded_year = original_loaded_year
+        data_manager.loaded_quarter = original_loaded_quarter
+        data_manager.source_url = original_source_url
+
+    return {
+        "message": (
+            f"No recent sponsorship data found for {company_name}. "
+            "Searched the latest four fiscal quarters: "
+            f"{', '.join(searched_periods)}."
+        ),
+        "searched_periods": searched_periods,
+    }
 
 @mcp.tool(description="Export filtered H-1B data to CSV file")
 def export_results(
