@@ -441,7 +441,106 @@ def load_h1b_data(
             "message": "Failed to load data. Check year/quarter or try again."
         }
 
-@mcp.tool(description="Search H-1B sponsoring companies by job role and location")
+def _get_employer_column(df: pd.DataFrame) -> str:
+    if "EMPLOYER_NAME" in df.columns:
+        return "EMPLOYER_NAME"
+    if "EMPLOYER_BUSINESS_DBA" in df.columns:
+        return "EMPLOYER_BUSINESS_DBA"
+    raise KeyError("Loaded H-1B data has no employer column")
+
+
+def _normalise_employer(value: Any) -> str:
+    if pd.isna(value):
+        return ""
+    return " ".join(str(value).split()).casefold()
+
+
+def _python_value(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def _build_company_stats(company_df: pd.DataFrame, employer_col: str) -> Dict:
+    """Calculate statistics across every loaded position for one company."""
+    if company_df.empty:
+        return {}
+
+    job_col = next(
+        (column for column in ["JOB_TITLE", "SOC_TITLE", "JOB_TITLE_CLEAN"] if column in company_df.columns),
+        None,
+    )
+    wage_col = next(
+        (
+            column
+            for column in [
+                "WAGE_RATE_OF_PAY_FROM",
+                "PREVAILING_WAGE",
+                "WAGE_RATE_OF_PAY",
+            ]
+            if column in company_df.columns
+        ),
+        None,
+    )
+
+    stats = {
+        "company": company_df[employer_col].iloc[0],
+        "total_applications": int(len(company_df)),
+        "certified": (
+            int(
+                company_df["CASE_STATUS"]
+                .astype(str)
+                .str.casefold()
+                .eq("certified")
+                .sum()
+            )
+            if "CASE_STATUS" in company_df.columns
+            else "N/A"
+        ),
+        "fiscal_periods": [data_manager.period_label()],
+        "data_version": data_manager.period_label(),
+        "source_url": data_manager.source_url,
+    }
+
+    if isinstance(stats["certified"], int):
+        stats["certification_rate"] = round(
+            stats["certified"] / len(company_df) * 100,
+            2,
+        )
+
+    if job_col:
+        stats["top_job_titles"] = {
+            str(job_title): int(count)
+            for job_title, count in company_df[job_col].value_counts().head(10).items()
+        }
+
+    if wage_col:
+        wages = pd.to_numeric(company_df[wage_col], errors="coerce")
+        stats["wage_stats"] = {
+            "min": _python_value(wages.min()),
+            "max": _python_value(wages.max()),
+            "mean": _python_value(wages.mean()),
+            "median": _python_value(wages.median()),
+        }
+
+    if "WORKSITE_STATE" in company_df.columns:
+        stats["top_states"] = {
+            str(state): int(count)
+            for state, count in company_df["WORKSITE_STATE"].value_counts().head(5).items()
+        }
+
+    return stats
+
+
+@mcp.tool(
+    description=(
+        "Search H-1B sponsoring companies by job role and location. Each "
+        "position includes company-level statistics calculated across all "
+        "loaded positions for that employer."
+    )
+)
 def search_h1b_jobs(
     job_role: str,
     city: Optional[str] = None,
@@ -467,7 +566,10 @@ def search_h1b_jobs(
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
     
-    df = data_manager.get_loaded_data().copy()
+    all_df = data_manager.get_loaded_data().copy()
+    df = all_df.copy()
+
+    employer_col = _get_employer_column(all_df)
     
     job_columns = ['JOB_TITLE', 'SOC_TITLE', 'JOB_TITLE_CLEAN']
     job_col = None
@@ -512,7 +614,14 @@ def search_h1b_jobs(
     if status_col:
         df = df[df[status_col].astype(str).str.casefold() == 'certified']
     
-    employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
+    all_employer_keys = all_df[employer_col].map(_normalise_employer)
+    company_stats_by_key = {}
+    for employer in df[employer_col].dropna().unique():
+        employer_key = _normalise_employer(employer)
+        company_stats_by_key[employer_key] = _build_company_stats(
+            all_df[all_employer_keys == employer_key],
+            employer_col,
+        )
     
     results = []
     for _, row in df.head(max_results).iterrows():
@@ -522,6 +631,12 @@ def search_h1b_jobs(
             "city": row.get('WORKSITE_CITY', row.get('EMPLOYER_CITY', "Unknown")),
             "state": row.get('WORKSITE_STATE', row.get('EMPLOYER_STATE', "Unknown")),
         }
+
+        company_stats = company_stats_by_key.get(
+            _normalise_employer(row.get(employer_col))
+        )
+        if company_stats:
+            result["company_stats"] = company_stats
         
         if wage_col:
             result["wage"] = row.get(wage_col, "N/A")
@@ -543,7 +658,12 @@ def search_h1b_jobs(
         "source_url": data_manager.source_url,
     }
 
-@mcp.tool(description="Get statistics about H-1B sponsorships by company")
+@mcp.tool(
+    description=(
+        "Get statistics about all loaded H-1B positions and applications for "
+        "a company."
+    )
+)
 def get_company_stats(company_name: str) -> Dict:
     """
     Get detailed H-1B sponsorship statistics for a specific company.
@@ -558,52 +678,14 @@ def get_company_stats(company_name: str) -> Dict:
         return {"error": "H-1B disclosure data could not be loaded."}
     
     df = data_manager.get_loaded_data().copy()
-    
-    employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
+
+    employer_col = _get_employer_column(df)
     df = df[df[employer_col].str.contains(company_name, case=False, na=False)]
     
     if len(df) == 0:
         return {"message": f"No records found for {company_name}"}
     
-    job_col = None
-    for col in ['JOB_TITLE', 'SOC_TITLE', 'JOB_TITLE_CLEAN']:
-        if col in df.columns:
-            job_col = col
-            break
-    
-    wage_col = None
-    for col in ['WAGE_RATE_OF_PAY_FROM', 'PREVAILING_WAGE', 'WAGE_RATE_OF_PAY']:
-        if col in df.columns:
-            wage_col = col
-            df[wage_col] = pd.to_numeric(df[wage_col], errors='coerce')
-            break
-    
-    stats = {
-        "company": df[employer_col].iloc[0],
-        "total_applications": len(df),
-        "certified": int(df['CASE_STATUS'].astype(str).str.casefold().eq('certified').sum()) if 'CASE_STATUS' in df.columns else "N/A",
-        "fiscal_periods": [data_manager.period_label()],
-        "data_version": data_manager.period_label(),
-        "source_url": data_manager.source_url,
-    }
-    
-    if job_col:
-        top_jobs = df[job_col].value_counts().head(10).to_dict()
-        stats["top_job_titles"] = top_jobs
-    
-    if wage_col:
-        stats["wage_stats"] = {
-            "min": df[wage_col].min(),
-            "max": df[wage_col].max(),
-            "mean": df[wage_col].mean(),
-            "median": df[wage_col].median()
-        }
-    
-    if 'WORKSITE_STATE' in df.columns:
-        top_states = df['WORKSITE_STATE'].value_counts().head(5).to_dict()
-        stats["top_states"] = top_states
-    
-    return stats
+    return _build_company_stats(df, employer_col)
 
 @mcp.tool(description="Export filtered H-1B data to CSV file")
 def export_results(

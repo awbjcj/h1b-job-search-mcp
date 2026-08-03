@@ -59,6 +59,9 @@ Search for H-1B sponsoring companies by job role and location.
   - `max_results`: Maximum results to return
   - `skip_agencies`: Skip staffing agencies (default: true)
 
+Each returned position includes `company_stats`, calculated across all loaded
+positions for that employer rather than only the filtered search results.
+
 ### 3. `get_company_stats`
 Get detailed H-1B sponsorship statistics for a specific company.
 - **Parameters**:
