@@ -59,6 +59,19 @@ class H1BServerTests(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["total_applications"], 1)
 
+    def test_loaded_data_accessor_rejects_unloaded_manager(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "data is not loaded"):
+            server.data_manager.get_loaded_data()
+
+    def test_load_h1b_data_reports_cached_frame_details(self) -> None:
+        self.cache_default_disclosure()
+
+        result = server.load_h1b_data()
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["records_loaded"], 1)
+        self.assertIn("CASE_STATUS", result["columns"])
+
     def test_company_stats_identifies_the_loaded_disclosure_period(self) -> None:
         self.cache_default_disclosure()
 

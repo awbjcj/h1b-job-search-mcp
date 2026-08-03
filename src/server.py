@@ -18,7 +18,7 @@ os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
 class H1BDataManager:
     def __init__(self):
-        self.df = None
+        self.df: pd.DataFrame | None = None
         self.last_loaded = None
         self.current_file = None
         self.loaded_year = None
@@ -71,7 +71,10 @@ class H1BDataManager:
         # Try loading from cache first
         if not force_download and os.path.exists(cache_file):
             try:
-                self.df = pd.read_pickle(cache_file)
+                cached_data = pd.read_pickle(cache_file)
+                if not isinstance(cached_data, pd.DataFrame):
+                    raise TypeError("Cached H-1B data is not a DataFrame")
+                self.df = cached_data
                 self.current_file = cache_file
                 self.last_loaded = datetime.now()
                 self.loaded_year = year
@@ -211,6 +214,12 @@ class H1BDataManager:
     def is_loaded(self) -> bool:
         return self.df is not None
 
+    def get_loaded_data(self) -> pd.DataFrame:
+        """Return the disclosure data after enforcing the loaded-state invariant."""
+        if self.df is None:
+            raise RuntimeError("H-1B disclosure data is not loaded")
+        return self.df
+
     def period_label(self) -> str | None:
         if self.loaded_year is None or self.loaded_quarter is None:
             return None
@@ -257,10 +266,11 @@ def load_h1b_data(year: int = 2024, quarter: int = 4, force_download: bool = Fal
     success = data_manager.load_data(year, quarter, force_download)
     
     if success:
+        df = data_manager.get_loaded_data()
         return {
             "status": "success",
-            "records_loaded": len(data_manager.df),
-            "columns": list(data_manager.df.columns)[:20],
+            "records_loaded": len(df),
+            "columns": list(df.columns)[:20],
             "year": year,
             "quarter": quarter,
             "cache_file": data_manager.current_file,
@@ -300,7 +310,7 @@ def search_h1b_jobs(
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
     
-    df = data_manager.df.copy()
+    df = data_manager.get_loaded_data().copy()
     
     job_columns = ['JOB_TITLE', 'SOC_TITLE', 'JOB_TITLE_CLEAN']
     job_col = None
@@ -390,7 +400,7 @@ def get_company_stats(company_name: str) -> Dict:
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
     
-    df = data_manager.df.copy()
+    df = data_manager.get_loaded_data().copy()
     
     employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
     df = df[df[employer_col].str.contains(company_name, case=False, na=False)]
@@ -500,7 +510,7 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     if not data_manager.is_loaded():
         return {"error": "Data not loaded. Please run load_h1b_data first."}
     
-    df = data_manager.df.copy()
+    df = data_manager.get_loaded_data().copy()
     
     employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
     
