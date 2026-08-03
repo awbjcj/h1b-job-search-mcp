@@ -59,6 +59,19 @@ class H1BServerTests(unittest.TestCase):
         self.assertNotIn("error", result)
         self.assertEqual(result["total_applications"], 1)
 
+    def test_company_stats_identifies_the_loaded_disclosure_period(self) -> None:
+        self.cache_default_disclosure()
+
+        result = server.get_company_stats("Google")
+
+        self.assertEqual(result.get("fiscal_periods"), ["FY2024 Q4"])
+        self.assertEqual(result.get("data_version"), "FY2024 Q4")
+        self.assertEqual(
+            result.get("source_url"),
+            "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs/"
+            "LCA_Disclosure_Data_FY2024_Q4.xlsx",
+        )
+
     def test_company_stats_counts_modern_title_case_certified_status(self) -> None:
         server.data_manager.df = disclosure_rows(case_status="Certified")
 
@@ -78,6 +91,16 @@ class H1BServerTests(unittest.TestCase):
         urls = server.H1BDataManager().get_dol_urls(2025, 4)
 
         self.assertTrue(urls[0].endswith("LCA_Disclosure_Data_FY2025_Q4.xlsx"))
+
+    def test_available_data_reports_cached_periods_instead_of_calendar_guesses(self) -> None:
+        self.cache_default_disclosure()
+        server.get_company_stats("Google")
+
+        result = server.get_available_data()
+
+        self.assertEqual(result.get("loaded_period"), "FY2024 Q4")
+        self.assertEqual(result.get("available_periods"), ["FY2024 Q4"])
+        self.assertNotIn("current_period", result)
 
     def test_http_startup_loads_data_before_health_reports_ready(self) -> None:
         self.cache_default_disclosure()
