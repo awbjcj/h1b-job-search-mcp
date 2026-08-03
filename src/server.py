@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 import os
+import asyncio
 import pandas as pd
 import requests
 import subprocess
+from contextlib import asynccontextmanager
 from io import StringIO
 from typing import List, Dict, Optional
 from datetime import datetime
 from fastmcp import FastMCP
-
-mcp = FastMCP("H1B Job Search MCP Server")
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "data_cache")
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
@@ -51,10 +53,6 @@ class H1BDataManager:
                     f"{base_dol}/LCA_FY{year}.xlsx",
                     f"{base_dol}/LCA FY{year}.xlsx",   # With space
                 ])
-        
-        # For the latest data (FY2025 Q3 as shown on the page)
-        if year == 2025:
-            urls.insert(0, f"{base_dol}/LCA_Disclosure_Data_FY2025_Q3.xlsx")
         
         # Fallback: Try the flcdatacenter.com when it's back online
         # (currently down due to funding lapse)
@@ -195,11 +193,35 @@ class H1BDataManager:
         print("The DOL website may be under maintenance or the data format may have changed.")
         print("Please check https://www.dol.gov/agencies/eta/foreign-labor/performance for updates.")
         return False
+
+    def ensure_loaded(self) -> bool:
+        """Load the default disclosure period when a fresh process has no data."""
+        return self.is_loaded() or self.load_data()
     
     def is_loaded(self) -> bool:
         return self.df is not None
 
 data_manager = H1BDataManager()
+
+
+@asynccontextmanager
+async def server_lifespan(_server):
+    loaded = await asyncio.to_thread(data_manager.ensure_loaded)
+    if not loaded:
+        raise RuntimeError("H-1B disclosure data could not be loaded during startup")
+    yield {"data_manager": data_manager}
+
+
+mcp = FastMCP("H1B Job Search MCP Server", lifespan=server_lifespan)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request: Request) -> JSONResponse:
+    ready = data_manager.is_loaded()
+    return JSONResponse(
+        {"status": "ok" if ready else "loading"},
+        status_code=200 if ready else 503,
+    )
 
 @mcp.tool(description="Download and load H-1B LCA disclosure data from the U.S. Department of Labor")
 def load_h1b_data(year: int = 2024, quarter: int = 4, force_download: bool = False) -> Dict:
@@ -254,8 +276,8 @@ def search_h1b_jobs(
     Returns:
         List of matching employers with details
     """
-    if not data_manager.is_loaded():
-        return {"error": "Data not loaded. Please run load_h1b_data first."}
+    if not data_manager.ensure_loaded():
+        return {"error": "H-1B disclosure data could not be loaded."}
     
     df = data_manager.df.copy()
     
@@ -300,7 +322,7 @@ def search_h1b_jobs(
     
     status_col = 'CASE_STATUS' if 'CASE_STATUS' in df.columns else None
     if status_col:
-        df = df[df[status_col] == 'CERTIFIED']
+        df = df[df[status_col].astype(str).str.casefold() == 'certified']
     
     employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
     
@@ -341,8 +363,8 @@ def get_company_stats(company_name: str) -> Dict:
     Returns:
         Statistics including sponsorship count, job titles, wages
     """
-    if not data_manager.is_loaded():
-        return {"error": "Data not loaded. Please run load_h1b_data first."}
+    if not data_manager.ensure_loaded():
+        return {"error": "H-1B disclosure data could not be loaded."}
     
     df = data_manager.df.copy()
     
@@ -368,7 +390,7 @@ def get_company_stats(company_name: str) -> Dict:
     stats = {
         "company": df[employer_col].iloc[0],
         "total_applications": len(df),
-        "certified": len(df[df.get('CASE_STATUS', '') == 'CERTIFIED']) if 'CASE_STATUS' in df.columns else "N/A",
+        "certified": int(df['CASE_STATUS'].astype(str).str.casefold().eq('certified').sum()) if 'CASE_STATUS' in df.columns else "N/A",
     }
     
     if job_col:
