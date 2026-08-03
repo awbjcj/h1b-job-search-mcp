@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import asyncio
+import re
 import pandas as pd
 import requests
 import subprocess
@@ -20,6 +21,9 @@ class H1BDataManager:
         self.df = None
         self.last_loaded = None
         self.current_file = None
+        self.loaded_year = None
+        self.loaded_quarter = None
+        self.source_url = None
         
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
@@ -70,6 +74,9 @@ class H1BDataManager:
                 self.df = pd.read_pickle(cache_file)
                 self.current_file = cache_file
                 self.last_loaded = datetime.now()
+                self.loaded_year = year
+                self.loaded_quarter = quarter
+                self.source_url = self.get_dol_urls(year, quarter)[0]
                 print(f"Loaded cached data from {cache_file}")
                 return True
             except Exception as e:
@@ -170,6 +177,9 @@ class H1BDataManager:
                 self.df.to_pickle(cache_file)
                 self.current_file = cache_file
                 self.last_loaded = datetime.now()
+                self.loaded_year = year
+                self.loaded_quarter = quarter
+                self.source_url = url
                 
                 # Clean up Excel file to save space
                 if os.path.exists(excel_file):
@@ -201,6 +211,11 @@ class H1BDataManager:
     def is_loaded(self) -> bool:
         return self.df is not None
 
+    def period_label(self) -> str | None:
+        if self.loaded_year is None or self.loaded_quarter is None:
+            return None
+        return f"FY{self.loaded_year} Q{self.loaded_quarter}"
+
 data_manager = H1BDataManager()
 
 
@@ -219,7 +234,10 @@ mcp = FastMCP("H1B Job Search MCP Server", lifespan=server_lifespan)
 async def health_check(_request: Request) -> JSONResponse:
     ready = data_manager.is_loaded()
     return JSONResponse(
-        {"status": "ok" if ready else "loading"},
+        {
+            "status": "ok" if ready else "loading",
+            "data_version": data_manager.period_label(),
+        },
         status_code=200 if ready else 503,
     )
 
@@ -245,7 +263,10 @@ def load_h1b_data(year: int = 2024, quarter: int = 4, force_download: bool = Fal
             "columns": list(data_manager.df.columns)[:20],
             "year": year,
             "quarter": quarter,
-            "cache_file": data_manager.current_file
+            "cache_file": data_manager.current_file,
+            "fiscal_periods": [data_manager.period_label()],
+            "data_version": data_manager.period_label(),
+            "source_url": data_manager.source_url,
         }
     else:
         return {
@@ -349,7 +370,10 @@ def search_h1b_jobs(
     return {
         "total_matches": len(df),
         "returned": len(results),
-        "results": results
+        "results": results,
+        "fiscal_periods": [data_manager.period_label()],
+        "data_version": data_manager.period_label(),
+        "source_url": data_manager.source_url,
     }
 
 @mcp.tool(description="Get statistics about H-1B sponsorships by company")
@@ -391,6 +415,9 @@ def get_company_stats(company_name: str) -> Dict:
         "company": df[employer_col].iloc[0],
         "total_applications": len(df),
         "certified": int(df['CASE_STATUS'].astype(str).str.casefold().eq('certified').sum()) if 'CASE_STATUS' in df.columns else "N/A",
+        "fiscal_periods": [data_manager.period_label()],
+        "data_version": data_manager.period_label(),
+        "source_url": data_manager.source_url,
     }
     
     if job_col:
@@ -825,7 +852,7 @@ def ask(prompt: str) -> Dict:
             "action": "get_available_data",
             "result": result,
             "suggestions": [
-                f"Load data for {result['current_period']['year']} Q{result['current_period']['quarter']}",
+                f"Use the loaded {result.get('loaded_period', 'H-1B')} data",
                 "Search for jobs",
                 "Show me top sponsors"
             ]
@@ -864,18 +891,18 @@ def get_available_data() -> Dict:
             if file.endswith('.pkl'):
                 cached_files.append(file)
     
-    current_year = datetime.now().year
-    current_quarter = (datetime.now().month - 1) // 3 + 1
-    
+    available_periods = []
+    for file in cached_files:
+        match = re.fullmatch(r"LCA_(\d{4})Q([1-4])\.pkl", file)
+        if match:
+            available_periods.append(f"FY{match.group(1)} Q{match.group(2)}")
+
     return {
-        "current_period": {
-            "year": current_year,
-            "quarter": current_quarter
-        },
-        "available_years": list(range(2020, current_year + 1)),
-        "available_quarters": [1, 2, 3, 4],
+        "loaded_period": data_manager.period_label(),
+        "available_periods": sorted(available_periods),
         "cached_files": cached_files,
         "cache_directory": DATA_CACHE_DIR,
+        "source_url": data_manager.source_url,
         "note": "LCA data is typically available with a 1-quarter delay"
     }
 
