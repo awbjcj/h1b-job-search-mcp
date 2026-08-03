@@ -23,11 +23,12 @@ def main():
         print("Failed to load data. Please ensure test_download.xlsx exists")
         return
 
-    print(f'✅ Loaded {len(dm.df):,} real H-1B records')
+    loaded_df = dm.get_loaded_data()
+    print(f'✅ Loaded {len(loaded_df):,} real H-1B records')
     
     # Test 1: Search for specific jobs
     print('\n1. SEARCH TEST: Software Engineers in California paying > $150k')
-    df_filtered = dm.df.copy()
+    df_filtered = loaded_df.copy()
     
     # Filter by job title
     if 'JOB_TITLE' in df_filtered.columns:
@@ -53,12 +54,12 @@ def main():
         for i, (company, count) in enumerate(df_filtered['EMPLOYER_NAME'].value_counts().head(5).items(), 1):
             wages = df_filtered[df_filtered['EMPLOYER_NAME'] == company]['WAGE_RATE_OF_PAY_FROM']
             avg_wage = wages.mean()
-            print(f'   {i}. {company[:40]:<40} ({count} positions, avg ${avg_wage:,.0f})')
+            print(f'   {i}. {str(company)[:40]:<40} ({count} positions, avg ${avg_wage:,.0f})')
     
     # Test 2: Company statistics  
     print('\n2. COMPANY TEST: Google H-1B Statistics')
-    if 'EMPLOYER_NAME' in dm.df.columns:
-        google_df = dm.df[dm.df['EMPLOYER_NAME'].str.contains('Google', case=False, na=False)]
+    if 'EMPLOYER_NAME' in loaded_df.columns:
+        google_df = loaded_df[loaded_df['EMPLOYER_NAME'].str.contains('Google', case=False, na=False)]
         if len(google_df) > 0:
             print(f'   Total applications: {len(google_df)}')
             
@@ -79,9 +80,9 @@ def main():
     
     # Test 3: Top sponsors without agencies
     print('\n3. TOP SPONSORS TEST: Direct employers (no agencies)')
-    if 'EMPLOYER_NAME' in dm.df.columns:
+    if 'EMPLOYER_NAME' in loaded_df.columns:
         # Filter out agencies
-        non_agency = dm.df.copy()
+        non_agency = loaded_df.copy()
         agency_keywords = ['staffing', 'consulting', 'infosys', 'tcs', 'wipro', 
                           'cognizant', 'hcl', 'tech mahindra', 'capgemini']
         
@@ -90,11 +91,11 @@ def main():
         
         print('   Top 10 direct H-1B employers:')
         for i, (company, count) in enumerate(non_agency['EMPLOYER_NAME'].value_counts().head(10).items(), 1):
-            print(f'   {i:2}. {company[:45]:<45} ({count:,} apps)')
+            print(f'   {i:2}. {str(company)[:45]:<45} ({count:,} apps)')
     
     # Test 4: Export capability
     print('\n4. EXPORT TEST: Saving search results to CSV')
-    export_df = df_filtered.head(100) if len(df_filtered) > 0 else dm.df.head(100)
+    export_df = df_filtered.head(100) if len(df_filtered) > 0 else loaded_df.head(100)
     export_cols = ['EMPLOYER_NAME', 'JOB_TITLE', 'WORKSITE_CITY', 'WORKSITE_STATE', 
                    'WAGE_RATE_OF_PAY_FROM', 'CASE_STATUS']
     export_cols = [col for col in export_cols if col in export_df.columns]
