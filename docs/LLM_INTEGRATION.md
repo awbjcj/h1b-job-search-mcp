@@ -115,10 +115,10 @@ paths:
               properties:
                 year:
                   type: integer
-                  default: 2024
+                  description: Optional fiscal year; provide with quarter, or omit both to load the latest available period
                 quarter:
                   type: integer
-                  default: 4
+                  description: Optional quarter 1-4; provide with year, or omit both to load the latest available period
                 force_download:
                   type: boolean
                   default: false
@@ -237,8 +237,8 @@ functions = [
         "parameters": {
             "type": "object",
             "properties": {
-                "year": {"type": "integer", "default": 2024},
-                "quarter": {"type": "integer", "default": 4},
+                "year": {"type": "integer", "description": "Optional fiscal year; provide with quarter, or omit both to load the latest available period"},
+                "quarter": {"type": "integer", "description": "Optional quarter 1-4; provide with year, or omit both to load the latest available period"},
                 "force_download": {"type": "boolean", "default": False}
             }
         }

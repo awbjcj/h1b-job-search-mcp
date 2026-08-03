@@ -7,7 +7,7 @@ import requests
 import subprocess
 from contextlib import asynccontextmanager
 from io import StringIO
-from typing import List, Dict, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 from fastmcp import FastMCP
 from starlette.requests import Request
@@ -15,6 +15,17 @@ from starlette.responses import JSONResponse
 
 DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "data_cache")
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+DOL_PERFORMANCE_URL = "https://www.dol.gov/agencies/eta/foreign-labor/performance"
+DOL_REQUEST_HEADERS = {
+    "User-Agent": "h1b-job-search-mcp/1.0 (+https://www.dol.gov/)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+LCA_DISCLOSURE_PATTERN = re.compile(
+    r"LCA_Dis(?:l)?closure_Data_FY(20\d{2})_Q([1-4])\.xlsx",
+    re.IGNORECASE,
+)
+LATEST_DISCOVERY_LOOKBACK_YEARS = 5
 
 class H1BDataManager:
     def __init__(self):
@@ -24,6 +35,9 @@ class H1BDataManager:
         self.loaded_year = None
         self.loaded_quarter = None
         self.source_url = None
+        self.latest_available_year = None
+        self.latest_available_quarter = None
+        self.latest_checked = None
         
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
@@ -32,14 +46,17 @@ class H1BDataManager:
         # Base URL for DOL OFLC PDFs directory
         base_dol = "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs"
         
-        # Based on the actual DOL page, the naming patterns are:
-        # For 2024: LCA_Disclosure_Data_FY2024_Q1.xlsx, Q2, Q3, Q4
-        # For 2023 and earlier: Similar patterns
+        # Based on the actual DOL page, current and recent fiscal years use
+        # LCA_Disclosure_Data_FY{year}_Q{quarter}.xlsx.
+        # Older years use several historical naming patterns.
         # For older years (pre-2020): H-1B FY2019.xlsx or H1B FY2017.xlsx
         
         if year >= 2020:
             # Modern naming convention (2020+)
             urls.append(f"{base_dol}/LCA_Disclosure_Data_FY{year}_Q{quarter}.xlsx")
+            # DOL currently has a published FY2026 file with this spelling
+            # typo; keep both variants so discovery and download agree.
+            urls.append(f"{base_dol}/LCA_Dislclosure_Data_FY{year}_Q{quarter}.xlsx")
             
             # Some years use different patterns for different quarters
             if year == 2020:
@@ -64,8 +81,130 @@ class H1BDataManager:
         
         return urls
     
-    def load_data(self, year: int = 2024, quarter: int = 4, force_download: bool = False) -> bool:
+    def get_cached_periods(self) -> list[tuple[int, int]]:
+        """Return cached fiscal periods ordered from oldest to newest."""
+        if not os.path.exists(DATA_CACHE_DIR):
+            return []
+
+        periods = set()
+        for file_name in os.listdir(DATA_CACHE_DIR):
+            match = re.fullmatch(r"LCA_(\d{4})Q([1-4])\.pkl", file_name)
+            if match:
+                periods.add((int(match.group(1)), int(match.group(2))))
+        return sorted(periods)
+
+    def newest_cached_period(self) -> tuple[int, int] | None:
+        """Return the newest cached fiscal period, if one exists."""
+        periods = self.get_cached_periods()
+        return periods[-1] if periods else None
+
+    def _record_latest_period(self, period: tuple[int, int]) -> tuple[int, int]:
+        self.latest_available_year, self.latest_available_quarter = period
+        self.latest_checked = datetime.now()
+        return period
+
+    def discover_latest_period(self) -> tuple[int, int] | None:
+        """Discover the newest LCA disclosure period published by DOL.
+
+        The DOL performance page is the source of truth. If that page is
+        temporarily unavailable, probe the recent direct-file URLs before
+        falling back to the newest local cache.
+        """
+        try:
+            response = requests.get(
+                DOL_PERFORMANCE_URL,
+                headers=DOL_REQUEST_HEADERS,
+                timeout=30,
+            )
+            response.raise_for_status()
+            periods = {
+                (int(year), int(quarter))
+                for year, quarter in LCA_DISCLOSURE_PATTERN.findall(response.text)
+            }
+            if periods:
+                return self._record_latest_period(max(periods))
+            print("DOL performance page did not list any LCA disclosure files")
+        except requests.exceptions.RequestException as error:
+            print(f"Could not read the DOL performance page: {error}")
+        except Exception as error:
+            print(f"Could not parse the DOL performance page: {error}")
+
+        return self._probe_latest_periods()
+
+    def _probe_latest_periods(self) -> tuple[int, int] | None:
+        """Find the newest recent period when the DOL page cannot be read."""
+        now = datetime.now()
+        current_fiscal_year = now.year + (1 if now.month >= 10 else 0)
+
+        for year in range(
+            current_fiscal_year,
+            current_fiscal_year - LATEST_DISCOVERY_LOOKBACK_YEARS - 1,
+            -1,
+        ):
+            for quarter in range(4, 0, -1):
+                for url in self.get_dol_urls(year, quarter):
+                    if "dol.gov" not in url:
+                        continue
+                    try:
+                        response = requests.get(
+                            url,
+                            headers=DOL_REQUEST_HEADERS,
+                            stream=True,
+                            timeout=15,
+                        )
+                        try:
+                            content_type = response.headers.get("content-type", "").lower()
+                            if response.status_code == 200 and "text/html" not in content_type:
+                                return self._record_latest_period((year, quarter))
+                        finally:
+                            response.close()
+                    except requests.exceptions.RequestException:
+                        continue
+
+        return None
+
+    def load_latest_data(self, force_download: bool = False) -> bool:
+        """Discover, download, and cache the newest available LCA period."""
+        latest_period = self.discover_latest_period()
+        if latest_period is None:
+            latest_period = self.newest_cached_period()
+            if latest_period is None:
+                print("No current DOL period or cached LCA data is available")
+                return False
+            print(
+                "Using the newest cached LCA period because the current DOL "
+                f"period could not be discovered: FY{latest_period[0]} Q{latest_period[1]}"
+            )
+
+        year, quarter = latest_period
+        if self.load_data(year, quarter, force_download):
+            return True
+
+        # Keep the server usable if a newly published file is temporarily
+        # unavailable and an older processed cache exists.
+        cached_period = self.newest_cached_period()
+        if cached_period and cached_period != latest_period:
+            print(
+                "Falling back to the newest cached LCA period: "
+                f"FY{cached_period[0]} Q{cached_period[1]}"
+            )
+            return self.load_data(*cached_period)
+        return False
+
+    def load_data(
+        self,
+        year: int | None = None,
+        quarter: int | None = None,
+        force_download: bool = False,
+    ) -> bool:
         """Load LCA data from cache or download if needed"""
+        if year is None and quarter is None:
+            return self.load_latest_data(force_download)
+        if year is None or quarter is None:
+            raise ValueError("year and quarter must be provided together")
+        if quarter not in range(1, 5):
+            raise ValueError("quarter must be between 1 and 4")
+
         cache_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.pkl")
         
         # Try loading from cache first
@@ -208,8 +347,8 @@ class H1BDataManager:
         return False
 
     def ensure_loaded(self) -> bool:
-        """Load the default disclosure period when a fresh process has no data."""
-        return self.is_loaded() or self.load_data()
+        """Load the latest disclosure period when a fresh process has no data."""
+        return self.is_loaded() or self.load_latest_data()
     
     def is_loaded(self) -> bool:
         return self.df is not None
@@ -224,6 +363,11 @@ class H1BDataManager:
         if self.loaded_year is None or self.loaded_quarter is None:
             return None
         return f"FY{self.loaded_year} Q{self.loaded_quarter}"
+
+    def latest_period_label(self) -> str | None:
+        if self.latest_available_year is None or self.latest_available_quarter is None:
+            return None
+        return f"FY{self.latest_available_year} Q{self.latest_available_quarter}"
 
 data_manager = H1BDataManager()
 
@@ -250,20 +394,33 @@ async def health_check(_request: Request) -> JSONResponse:
         status_code=200 if ready else 503,
     )
 
-@mcp.tool(description="Download and load H-1B LCA disclosure data from the U.S. Department of Labor")
-def load_h1b_data(year: int = 2024, quarter: int = 4, force_download: bool = False) -> Dict:
+@mcp.tool(
+    description=(
+        "Download and load H-1B LCA disclosure data from the U.S. Department "
+        "of Labor. If year and quarter are omitted, discover and load the "
+        "latest available period."
+    )
+)
+def load_h1b_data(
+    year: Optional[int] = None,
+    quarter: Optional[int] = None,
+    force_download: bool = False,
+) -> Dict:
     """
     Load H-1B LCA data for analysis.
     
     Args:
-        year: Fiscal year (default: 2024)
-        quarter: Quarter 1-4 (default: 4)
+        year: Fiscal year. Omit both year and quarter to discover the latest period.
+        quarter: Quarter 1-4. Omit both year and quarter to discover the latest period.
         force_download: Force re-download even if cached (default: False)
     
     Returns:
         Status and statistics about the loaded data
     """
-    success = data_manager.load_data(year, quarter, force_download)
+    try:
+        success = data_manager.load_data(year, quarter, force_download)
+    except ValueError as error:
+        return {"status": "error", "message": str(error)}
     
     if success:
         df = data_manager.get_loaded_data()
@@ -271,8 +428,8 @@ def load_h1b_data(year: int = 2024, quarter: int = 4, force_download: bool = Fal
             "status": "success",
             "records_loaded": len(df),
             "columns": list(df.columns)[:20],
-            "year": year,
-            "quarter": quarter,
+            "year": data_manager.loaded_year,
+            "quarter": data_manager.loaded_quarter,
             "cache_file": data_manager.current_file,
             "fiscal_periods": [data_manager.period_label()],
             "data_version": data_manager.period_label(),
@@ -584,23 +741,36 @@ def ask(prompt: str) -> Dict:
         return default
     
     # Helper to extract year and quarter
-    def extract_year_quarter(text: str) -> tuple:
-        year = extract_number(r'\b(20\d{2})\b', text, 2024) or 2024
+    def extract_year_quarter(text: str) -> tuple[Optional[int], Optional[int]]:
+        year = extract_number(r'\b(20\d{2})\b', text)
         quarter_val = extract_number(r'\bq(\d)\b', text)
         if quarter_val is None:
             quarter_val = extract_number(r'quarter\s+(\d)', text)
-        quarter = quarter_val or 4
-        return year, quarter
+        return year, quarter_val
     
     # 1. LOAD DATA
     if any(word in text for word in ['load', 'download', 'get', 'fetch']) and \
        any(word in text for word in ['data', 'h-1b', 'h1b', 'lca', 'records']):
-        year, quarter = extract_year_quarter(text)
         force = 'fresh' in text or 'force' in text or 'new' in text
-        result = load_h1b_data(year=year, quarter=quarter, force_download=force)
+        year, quarter = extract_year_quarter(text)
+        if year is None and quarter is None:
+            result = load_h1b_data(force_download=force)
+            message = "Checking and loading the latest available H-1B data..."
+        elif year is not None and quarter is None:
+            result = load_h1b_data(year=year, quarter=4, force_download=force)
+            message = f"Loading H-1B data for {year} Q4..."
+        elif year is not None and quarter is not None:
+            result = load_h1b_data(year=year, quarter=quarter, force_download=force)
+            message = f"Loading H-1B data for {year} Q{quarter}..."
+        else:
+            result = {
+                "status": "error",
+                "message": "Please provide a fiscal year when specifying a quarter.",
+            }
+            message = "I could not determine the requested fiscal period."
         return {
             "action": "load_h1b_data",
-            "message": f"Loading H-1B data for {year} Q{quarter}...",
+            "message": message,
             "result": result,
             "suggestions": [
                 "Find software engineer jobs",
@@ -881,7 +1051,7 @@ def ask(prompt: str) -> Dict:
             "Export Python developer jobs to CSV"
         ],
         "suggestions": [
-            "Load H-1B data for 2024 Q4",
+            "Load the latest H-1B data",
             "Search for your dream job",
             "Check top H-1B sponsors"
         ]
@@ -895,24 +1065,25 @@ def get_available_data() -> Dict:
     Returns:
         Available years, quarters, and cached files
     """
-    cached_files = []
-    if os.path.exists(DATA_CACHE_DIR):
-        for file in os.listdir(DATA_CACHE_DIR):
-            if file.endswith('.pkl'):
-                cached_files.append(file)
-    
-    available_periods = []
-    for file in cached_files:
-        match = re.fullmatch(r"LCA_(\d{4})Q([1-4])\.pkl", file)
-        if match:
-            available_periods.append(f"FY{match.group(1)} Q{match.group(2)}")
+    cached_periods = data_manager.get_cached_periods()
+    cached_files = [
+        f"LCA_{year}Q{quarter}.pkl" for year, quarter in cached_periods
+    ]
+
+    # Startup normally performs this check already, but make the inspection
+    # tool useful when called directly against a fresh manager as well.
+    if data_manager.latest_period_label() is None:
+        data_manager.discover_latest_period()
 
     return {
         "loaded_period": data_manager.period_label(),
-        "available_periods": sorted(available_periods),
+        "available_periods": [
+            f"FY{year} Q{quarter}" for year, quarter in cached_periods
+        ],
         "cached_files": cached_files,
         "cache_directory": DATA_CACHE_DIR,
         "source_url": data_manager.source_url,
+        "latest_period": data_manager.latest_period_label(),
         "note": "LCA data is typically available with a 1-quarter delay"
     }
 

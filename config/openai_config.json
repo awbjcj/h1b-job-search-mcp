@@ -14,13 +14,11 @@
       "parameters": {
         "year": {
           "type": "integer",
-          "default": 2024,
-          "description": "Fiscal year"
+          "description": "Fiscal year (provide with quarter, or omit both to load the latest available period)"
         },
         "quarter": {
           "type": "integer",
-          "default": 4,
-          "description": "Quarter (1-4)"
+          "description": "Quarter 1-4 (provide with year, or omit both to load the latest available period)"
         },
         "force_download": {
           "type": "boolean",

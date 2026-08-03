@@ -45,8 +45,8 @@ Just talk naturally! The `ask` tool understands plain English:
 ### 1. `load_h1b_data`
 Download and load H-1B LCA data from the Department of Labor.
 - **Parameters**:
-  - `year`: Fiscal year (default: 2024)
-  - `quarter`: Quarter 1-4 (default: 4)
+  - `year`: Fiscal year (provide with `quarter`, or omit both to discover the latest available period)
+  - `quarter`: Quarter 1-4 (provide with `year`, or omit both to discover the latest available period)
   - `force_download`: Force re-download even if cached
 
 ### 2. `search_h1b_jobs`
