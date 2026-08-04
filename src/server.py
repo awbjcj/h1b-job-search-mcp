@@ -852,26 +852,19 @@ def search_h1b_jobs(
 
 @mcp.tool(
     description=(
-        "Get statistics about a company's H-1B sponsorship data, aggregated "
-        "across the most recent four fiscal quarters that have data for it. "
-        "The response also includes a quarterly_breakdown with the same "
-        "statistics computed separately for each individual quarter, so a "
-        "specific quarter can be selected and shown on its own."
+        "Get statistics about a company's latest H-1B sponsorship data, "
+        "searching the most recent four fiscal quarters."
     )
 )
 def get_company_stats(company_name: str) -> Dict:
     """
-    Get detailed H-1B sponsorship statistics aggregated across the most
-    recent four fiscal quarters that have data for the company. The
-    top-level fields are the aggregate; `quarterly_breakdown` maps each
-    fiscal period label (e.g. "FY2026 Q1") to that quarter's own stats.
+    Get detailed H-1B sponsorship statistics for the latest matching quarter.
 
     Args:
         company_name: Company name to search for
 
     Returns:
-        Statistics including sponsorship count, job titles, wages, and a
-        per-quarter breakdown
+        Statistics including sponsorship count, job titles, wages
     """
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
@@ -885,22 +878,20 @@ def get_company_stats(company_name: str) -> Dict:
 
     periods = data_manager.recent_periods()
     searched_periods: list[str] = []
-    periods_with_data: list[str] = []
-    matched_frames: list[pd.DataFrame] = []
-    quarterly_breakdown: dict[str, Dict] = {}
-    employer_col: str | None = None
-    latest_source_url: str | None = None
 
     try:
         for year, quarter in periods:
             if year is None or quarter is None:
-                display_period = data_manager.period_label() or "currently loaded data"
+                period_label = data_manager.period_label()
+                display_period = period_label or "currently loaded data"
                 period_df = data_manager.get_loaded_data()
             elif (year, quarter) == (original_loaded_year, original_loaded_quarter):
-                display_period = f"FY{year} Q{quarter}"
+                period_label = f"FY{year} Q{quarter}"
+                display_period = period_label
                 period_df = data_manager.get_loaded_data()
             else:
-                display_period = f"FY{year} Q{quarter}"
+                period_label = f"FY{year} Q{quarter}"
+                display_period = period_label
                 if not data_manager.load_data(year, quarter):
                     searched_periods.append(display_period)
                     continue
@@ -916,30 +907,14 @@ def get_company_stats(company_name: str) -> Dict:
             if company_df.empty:
                 continue
 
-            periods_with_data.append(display_period)
-            matched_frames.append(company_df)
-            if latest_source_url is None:
-                latest_source_url = data_manager.source_url
-
-            quarterly_breakdown[display_period] = _build_company_stats(
+            stats = _build_company_stats(
                 company_df.copy(),
                 employer_col,
-                period_label=display_period,
+                period_label=period_label,
                 source_url=data_manager.source_url,
             )
-
-        if matched_frames:
-            combined_df = pd.concat(matched_frames, ignore_index=True)
-            stats = _build_company_stats(
-                combined_df,
-                cast(str, employer_col),
-                period_label=periods_with_data[0],
-                source_url=latest_source_url,
-            )
-            stats["fiscal_periods"] = periods_with_data
             stats["searched_periods"] = searched_periods
-            stats["latest_sponsorship_period"] = periods_with_data[0]
-            stats["quarterly_breakdown"] = quarterly_breakdown
+            stats["latest_sponsorship_period"] = period_label
             return stats
     finally:
         data_manager.df = original_df
