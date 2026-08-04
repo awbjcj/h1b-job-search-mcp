@@ -152,6 +152,49 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(result["top_job_titles"]["Software Engineer"], 1)
         self.assertEqual(result["top_job_titles"]["Data Scientist"], 1)
 
+    def test_company_stats_includes_quarterly_breakdown_alongside_aggregate(self) -> None:
+        self.cache_period(
+            2026,
+            1,
+            disclosure_rows().assign(
+                EMPLOYER_NAME="Woven by Toyota, U.S., Inc.",
+                JOB_TITLE="Software Engineer",
+                WAGE_RATE_OF_PAY_FROM=200_000,
+            ),
+        )
+        self.cache_period(
+            2025,
+            4,
+            disclosure_rows().assign(
+                EMPLOYER_NAME="Woven by Toyota, U.S., Inc.",
+                JOB_TITLE="Data Scientist",
+                WAGE_RATE_OF_PAY_FROM=180_000,
+            ),
+        )
+        self.cache_period(2025, 3, disclosure_rows())  # different company
+        self.cache_period(2025, 2, disclosure_rows())
+        self._discover_latest_period_mock.return_value = (2026, 1)
+
+        result = server.get_company_stats("WOVEN BY TOYOTA US INC")
+
+        self.assertEqual(
+            set(result["quarterly_breakdown"].keys()),
+            {"FY2026 Q1", "FY2025 Q4"},
+        )
+
+        q1 = result["quarterly_breakdown"]["FY2026 Q1"]
+        self.assertEqual(q1["total_applications"], 1)
+        self.assertEqual(q1["fiscal_periods"], ["FY2026 Q1"])
+        self.assertEqual(q1["data_version"], "FY2026 Q1")
+        self.assertEqual(q1["top_job_titles"], {"Software Engineer": 1})
+
+        q4 = result["quarterly_breakdown"]["FY2025 Q4"]
+        self.assertEqual(q4["total_applications"], 1)
+        self.assertEqual(q4["top_job_titles"], {"Data Scientist": 1})
+
+        # Aggregate view (top level) is unaffected by the per-quarter view.
+        self.assertEqual(result["total_applications"], 2)
+
     def test_employer_normalization_handles_common_legal_name_forms(self) -> None:
         self.assertEqual(
             server._normalise_employer("Woven by Toyota, U.S., Inc."),

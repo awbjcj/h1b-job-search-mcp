@@ -63,9 +63,15 @@ Each returned position includes `company_stats`, calculated across all loaded
 positions for that employer rather than only the filtered search results.
 
 ### 3. `get_company_stats`
-Get detailed H-1B sponsorship statistics for a specific company.
+Get detailed H-1B sponsorship statistics for a specific company, aggregated
+across the most recent four fiscal quarters that have data for it.
 - **Parameters**:
   - `company_name`: Company name to analyze
+
+The top-level response is the aggregate across all matching quarters. It
+also includes `quarterly_breakdown`, a map of fiscal period (e.g.
+`"FY2026 Q1"`) to that quarter's own stats, so a specific quarter can be
+selected and shown separately from the aggregate.
 
 ### 4. `get_top_sponsors`
 List top H-1B sponsoring companies by application volume.

@@ -853,19 +853,25 @@ def search_h1b_jobs(
 @mcp.tool(
     description=(
         "Get statistics about a company's H-1B sponsorship data, aggregated "
-        "across the most recent four fiscal quarters that have data for it."
+        "across the most recent four fiscal quarters that have data for it. "
+        "The response also includes a quarterly_breakdown with the same "
+        "statistics computed separately for each individual quarter, so a "
+        "specific quarter can be selected and shown on its own."
     )
 )
 def get_company_stats(company_name: str) -> Dict:
     """
     Get detailed H-1B sponsorship statistics aggregated across the most
-    recent four fiscal quarters that have data for the company.
+    recent four fiscal quarters that have data for the company. The
+    top-level fields are the aggregate; `quarterly_breakdown` maps each
+    fiscal period label (e.g. "FY2026 Q1") to that quarter's own stats.
 
     Args:
         company_name: Company name to search for
-    
+
     Returns:
-        Statistics including sponsorship count, job titles, wages
+        Statistics including sponsorship count, job titles, wages, and a
+        per-quarter breakdown
     """
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
@@ -881,6 +887,7 @@ def get_company_stats(company_name: str) -> Dict:
     searched_periods: list[str] = []
     periods_with_data: list[str] = []
     matched_frames: list[pd.DataFrame] = []
+    quarterly_breakdown: dict[str, Dict] = {}
     employer_col: str | None = None
     latest_source_url: str | None = None
 
@@ -914,6 +921,13 @@ def get_company_stats(company_name: str) -> Dict:
             if latest_source_url is None:
                 latest_source_url = data_manager.source_url
 
+            quarterly_breakdown[display_period] = _build_company_stats(
+                company_df.copy(),
+                employer_col,
+                period_label=display_period,
+                source_url=data_manager.source_url,
+            )
+
         if matched_frames:
             combined_df = pd.concat(matched_frames, ignore_index=True)
             stats = _build_company_stats(
@@ -925,6 +939,7 @@ def get_company_stats(company_name: str) -> Dict:
             stats["fiscal_periods"] = periods_with_data
             stats["searched_periods"] = searched_periods
             stats["latest_sponsorship_period"] = periods_with_data[0]
+            stats["quarterly_breakdown"] = quarterly_breakdown
             return stats
     finally:
         data_manager.df = original_df
