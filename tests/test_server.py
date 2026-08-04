@@ -46,8 +46,27 @@ class H1BServerTests(unittest.TestCase):
         # discovery.
         self._discover_latest_period_mock = Mock(return_value=None)
         server.data_manager.discover_latest_period = self._discover_latest_period_mock
+        # get_company_stats now walks every recent quarter (not just until
+        # the first match), so any period a test doesn't explicitly cache
+        # must fail fast instead of making a real network call.
+        self._no_network_patchers = [
+            patch.object(
+                server.requests,
+                "get",
+                side_effect=RuntimeError("Unit tests must not perform real network requests"),
+            ),
+            patch.object(
+                server.subprocess,
+                "run",
+                side_effect=RuntimeError("Unit tests must not perform real network requests"),
+            ),
+        ]
+        for patcher in self._no_network_patchers:
+            patcher.start()
 
     def tearDown(self) -> None:
+        for patcher in self._no_network_patchers:
+            patcher.stop()
         server.DATA_CACHE_DIR = self._original_cache_dir
         server.data_manager = self._original_data_manager
         self._temp_dir.cleanup()
@@ -81,6 +100,8 @@ class H1BServerTests(unittest.TestCase):
                 EMPLOYER_NAME="Woven by Toyota, U.S., Inc."
             ),
         )
+        self.cache_period(2025, 3, disclosure_rows())
+        self.cache_period(2025, 2, disclosure_rows())
         self._discover_latest_period_mock.return_value = (2026, 1)
 
         result = server.get_company_stats("WOVEN BY TOYOTA US INC")
@@ -91,9 +112,45 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(result["fiscal_periods"], ["FY2025 Q4"])
         self.assertEqual(
             result["searched_periods"],
-            ["FY2026 Q1", "FY2025 Q4"],
+            ["FY2026 Q1", "FY2025 Q4", "FY2025 Q3", "FY2025 Q2"],
         )
         self.assertEqual(server.data_manager.period_label(), "FY2026 Q1")
+
+    def test_company_stats_aggregates_matches_across_multiple_quarters(self) -> None:
+        self.cache_period(
+            2026,
+            1,
+            disclosure_rows().assign(
+                EMPLOYER_NAME="Woven by Toyota, U.S., Inc.",
+                JOB_TITLE="Software Engineer",
+                WAGE_RATE_OF_PAY_FROM=200_000,
+            ),
+        )
+        self.cache_period(
+            2025,
+            4,
+            disclosure_rows().assign(
+                EMPLOYER_NAME="Woven by Toyota, U.S., Inc.",
+                JOB_TITLE="Data Scientist",
+                WAGE_RATE_OF_PAY_FROM=180_000,
+            ),
+        )
+        self.cache_period(2025, 3, disclosure_rows())  # different company
+        self.cache_period(2025, 2, disclosure_rows())
+        self._discover_latest_period_mock.return_value = (2026, 1)
+
+        result = server.get_company_stats("WOVEN BY TOYOTA US INC")
+
+        self.assertEqual(result["total_applications"], 2)
+        self.assertEqual(result["fiscal_periods"], ["FY2026 Q1", "FY2025 Q4"])
+        self.assertEqual(result["data_version"], "FY2026 Q1")
+        self.assertEqual(result["latest_sponsorship_period"], "FY2026 Q1")
+        self.assertEqual(
+            result["searched_periods"],
+            ["FY2026 Q1", "FY2025 Q4", "FY2025 Q3", "FY2025 Q2"],
+        )
+        self.assertEqual(result["top_job_titles"]["Software Engineer"], 1)
+        self.assertEqual(result["top_job_titles"]["Data Scientist"], 1)
 
     def test_employer_normalization_handles_common_legal_name_forms(self) -> None:
         self.assertEqual(
@@ -156,6 +213,44 @@ class H1BServerTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["data_version"], "FY2026 Q2")
+
+    def test_get_dol_urls_includes_dol_media_host(self) -> None:
+        urls = server.H1BDataManager().get_dol_urls(2026, 2)
+
+        self.assertTrue(
+            any(url.startswith("https://www.dol.gov/media/") for url in urls),
+            "DOL has started hosting the newest LCA file under dol.gov/media/; "
+            "get_dol_urls must offer that host as a candidate.",
+        )
+
+    def test_latest_load_falls_back_only_to_dol_listed_periods(self) -> None:
+        # DOL's page lists FY2025 Q4 and FY2026 Q2 only. FY2026 Q1 is a stray
+        # file that still resolves on the legacy host but was never
+        # published/linked, so the fallback must never even attempt it.
+        self._discover_latest_period_mock.return_value = (2026, 2)
+        server.data_manager.discovered_periods = [
+            (2026, 2), (2025, 4), (2025, 3), (2025, 2), (2025, 1)
+        ]
+
+        attempted_periods: list[tuple[int | None, int | None]] = []
+
+        def fake_load_data(self, year=None, quarter=None, force_download=False):
+            attempted_periods.append((year, quarter))
+            if (year, quarter) == (2025, 4):
+                self.df = disclosure_rows()
+                self.loaded_year, self.loaded_quarter = year, quarter
+                self.source_url = "https://example.test/fake"
+                return True
+            # FY2026 Q2 (not downloadable yet) and the stray FY2026 Q1 file
+            # (if wrongly attempted) both report failure here.
+            return False
+
+        with patch.object(server.H1BDataManager, "load_data", fake_load_data):
+            result = server.data_manager.load_latest_data()
+
+        self.assertTrue(result)
+        self.assertEqual(server.data_manager.period_label(), "FY2025 Q4")
+        self.assertNotIn((2026, 1), attempted_periods)
 
     def test_ask_latest_loads_discovered_period(self) -> None:
         self.cache_disclosure(2025, 4)

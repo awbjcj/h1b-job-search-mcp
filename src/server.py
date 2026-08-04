@@ -92,6 +92,7 @@ class H1BDataManager:
         self.latest_available_year = None
         self.latest_available_quarter = None
         self.latest_checked = None
+        self.discovered_periods: list[tuple[int, int]] = []
         
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
@@ -111,7 +112,16 @@ class H1BDataManager:
             # DOL currently has a published FY2026 file with this spelling
             # typo; keep both variants so discovery and download agree.
             urls.append(f"{base_dol}/LCA_Dislclosure_Data_FY{year}_Q{quarter}.xlsx")
-            
+
+            # DOL has started publishing its newest LCA file under
+            # dol.gov/media/ instead of the legacy oflc/pdfs directory
+            # (older quarters still live at the legacy path). Offer both
+            # hosts so the newest period is downloadable as soon as it is
+            # discovered.
+            media_base = "https://www.dol.gov/media"
+            urls.append(f"{media_base}/LCA_Disclosure_Data_FY{year}_Q{quarter}.xlsx")
+            urls.append(f"{media_base}/LCA_Dislclosure_Data_FY{year}_Q{quarter}.xlsx")
+
             # Some years use different patterns for different quarters
             if year == 2020:
                 # 2020 uses a different pattern
@@ -176,6 +186,7 @@ class H1BDataManager:
                 for year, quarter in LCA_DISCLOSURE_PATTERN.findall(response.text)
             }
             if periods:
+                self.discovered_periods = sorted(periods, reverse=True)
                 return self._record_latest_period(max(periods))
             print("DOL performance page did not list any LCA disclosure files")
         except requests.exceptions.RequestException as error:
@@ -183,6 +194,7 @@ class H1BDataManager:
         except Exception as error:
             print(f"Could not parse the DOL performance page: {error}")
 
+        self.discovered_periods = []
         return self._probe_latest_periods()
 
     def _probe_latest_periods(self) -> tuple[int, int] | None:
@@ -231,22 +243,35 @@ class H1BDataManager:
             )
 
         # The DOL performance page can list a file before the corresponding
-        # download URL is usable. Try the newest cached period first, then a
-        # few previous quarters so startup can use the newest valid data.
+        # download URL is usable. Try the newest cached period first, then
+        # fall back through other periods DOL actually publishes so startup
+        # can use the newest valid data.
         candidate_periods = [latest_period]
         cached_period = self.newest_cached_period()
         if cached_period and cached_period not in candidate_periods:
             candidate_periods.append(cached_period)
 
-        year, quarter = latest_period
-        for _ in range(4):
-            quarter -= 1
-            if quarter == 0:
-                year -= 1
-                quarter = 4
-            previous_period = (year, quarter)
-            if previous_period not in candidate_periods:
-                candidate_periods.append(previous_period)
+        if self.discovered_periods:
+            # Only fall back to periods DOL has confirmed it publishes.
+            # Guessing prior quarters by arithmetic can land on stale,
+            # unlisted files that still resolve on the legacy host but are
+            # no longer the current data (e.g. a superseded single-quarter
+            # file after DOL replaces it with a combined-quarter release).
+            for period in self.discovered_periods:
+                if period not in candidate_periods:
+                    candidate_periods.append(period)
+        else:
+            # No confirmed period listing is available (the DOL page itself
+            # could not be read); guess backward from the probed period.
+            year, quarter = latest_period
+            for _ in range(4):
+                quarter -= 1
+                if quarter == 0:
+                    year -= 1
+                    quarter = 4
+                previous_period = (year, quarter)
+                if previous_period not in candidate_periods:
+                    candidate_periods.append(previous_period)
 
         for index, period in enumerate(candidate_periods):
             if index > 0:
@@ -827,14 +852,15 @@ def search_h1b_jobs(
 
 @mcp.tool(
     description=(
-        "Get statistics about a company's latest H-1B sponsorship data, "
-        "searching the most recent four fiscal quarters."
+        "Get statistics about a company's H-1B sponsorship data, aggregated "
+        "across the most recent four fiscal quarters that have data for it."
     )
 )
 def get_company_stats(company_name: str) -> Dict:
     """
-    Get detailed H-1B sponsorship statistics for the latest matching quarter.
-    
+    Get detailed H-1B sponsorship statistics aggregated across the most
+    recent four fiscal quarters that have data for the company.
+
     Args:
         company_name: Company name to search for
     
@@ -853,20 +879,21 @@ def get_company_stats(company_name: str) -> Dict:
 
     periods = data_manager.recent_periods()
     searched_periods: list[str] = []
+    periods_with_data: list[str] = []
+    matched_frames: list[pd.DataFrame] = []
+    employer_col: str | None = None
+    latest_source_url: str | None = None
 
     try:
         for year, quarter in periods:
             if year is None or quarter is None:
-                period_label = data_manager.period_label()
-                display_period = period_label or "currently loaded data"
+                display_period = data_manager.period_label() or "currently loaded data"
                 period_df = data_manager.get_loaded_data()
             elif (year, quarter) == (original_loaded_year, original_loaded_quarter):
-                period_label = f"FY{year} Q{quarter}"
-                display_period = period_label
+                display_period = f"FY{year} Q{quarter}"
                 period_df = data_manager.get_loaded_data()
             else:
-                period_label = f"FY{year} Q{quarter}"
-                display_period = period_label
+                display_period = f"FY{year} Q{quarter}"
                 if not data_manager.load_data(year, quarter):
                     searched_periods.append(display_period)
                     continue
@@ -882,14 +909,22 @@ def get_company_stats(company_name: str) -> Dict:
             if company_df.empty:
                 continue
 
+            periods_with_data.append(display_period)
+            matched_frames.append(company_df)
+            if latest_source_url is None:
+                latest_source_url = data_manager.source_url
+
+        if matched_frames:
+            combined_df = pd.concat(matched_frames, ignore_index=True)
             stats = _build_company_stats(
-                company_df.copy(),
-                employer_col,
-                period_label=period_label,
-                source_url=data_manager.source_url,
+                combined_df,
+                cast(str, employer_col),
+                period_label=periods_with_data[0],
+                source_url=latest_source_url,
             )
+            stats["fiscal_periods"] = periods_with_data
             stats["searched_periods"] = searched_periods
-            stats["latest_sponsorship_period"] = period_label
+            stats["latest_sponsorship_period"] = periods_with_data[0]
             return stats
     finally:
         data_manager.df = original_df
