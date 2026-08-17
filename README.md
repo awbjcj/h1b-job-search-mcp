@@ -118,6 +118,12 @@ npx @modelcontextprotocol/inspector
 
 Open http://localhost:3000 and connect to `http://localhost:8000/mcp` using "Streamable HTTP" transport.
 
+For the sibling resume-agent development stack, the root repository's
+`make dev` target starts this server on `H1B_HOST=127.0.0.1` and
+`H1B_PORT=8001`, then configures the API to use
+`http://127.0.0.1:8001/mcp`. The deployment-compatible `PORT` variable remains
+supported when this server is run by itself.
+
 ### Example Usage Flow
 
 1. **Load the data**:

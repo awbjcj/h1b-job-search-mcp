@@ -1416,8 +1416,11 @@ def get_available_data() -> Dict:
     }
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    host = "0.0.0.0"
+    # ``PORT`` remains the deployment-compatible fallback.  The namespaced
+    # overrides let a local launcher run this server beside another web API
+    # without colliding with that API's PORT/HOST settings.
+    port = int(os.environ.get("H1B_PORT", os.environ.get("PORT", 8000)))
+    host = os.environ.get("H1B_HOST", "0.0.0.0")
     
     print(f"Starting H1B Job Search MCP Server on {host}:{port}")
     print("Available tools:")
