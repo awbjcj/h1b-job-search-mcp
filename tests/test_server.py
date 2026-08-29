@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 from pathlib import Path
@@ -471,13 +472,25 @@ class H1BServerTests(unittest.TestCase):
         self.assertIsNone(result.get("latest_period"))
         self.assertNotIn("current_period", result)
 
-    def test_http_startup_loads_data_before_health_reports_ready(self) -> None:
+    def test_http_health_is_reachable_immediately_and_ready_after_warmup(self) -> None:
+        # The three-year cache warmup can take far longer than a platform
+        # healthcheck timeout, so it must run in the background: /health has
+        # to be reachable (even if "degraded") the instant the app starts,
+        # not only after the warmup finishes.
         self.cache_default_disclosure()
 
         with TestClient(server.mcp.http_app()) as client:
             response = client.get("/health")
+            self.assertEqual(response.status_code, 200)
 
-        self.assertEqual(response.status_code, 200)
+            deadline = time.monotonic() + 5
+            while (
+                response.json()["status"] != "ok"
+                and time.monotonic() < deadline
+            ):
+                time.sleep(0.05)
+                response = client.get("/health")
+
         self.assertEqual(response.json()["status"], "ok")
         self.assertTrue(server.data_manager.is_loaded())
 

@@ -544,15 +544,27 @@ class H1BDataManager:
 data_manager = H1BDataManager()
 
 
-@asynccontextmanager
-async def server_lifespan(_server):
+async def _warm_up_data_cache() -> None:
     cached_periods = await asyncio.to_thread(data_manager.cache_recent_data)
     if not cached_periods:
         print(
             "H-1B disclosure data is unavailable at startup; continuing with "
             "the server live so a later load can retry the DOL sources."
         )
-    yield {"data_manager": data_manager}
+
+
+@asynccontextmanager
+async def server_lifespan(_server):
+    # The three-year warmup downloads and parses up to a dozen multi-hundred
+    # MB DOL spreadsheets, which can take well over Railway's healthcheck
+    # timeout. Run it in the background so /health is reachable immediately
+    # (reporting "degraded" until the warmup finishes) instead of the whole
+    # server being unreachable during warmup.
+    warmup_task = asyncio.create_task(_warm_up_data_cache())
+    try:
+        yield {"data_manager": data_manager}
+    finally:
+        warmup_task.cancel()
 
 
 mcp = FastMCP("H1B Job Search MCP Server", lifespan=server_lifespan)
