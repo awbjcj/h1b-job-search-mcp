@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import warnings
@@ -161,15 +162,15 @@ class H1BServerTests(unittest.TestCase):
             "example",
         )
 
-    def test_company_stats_rejects_a_period_outside_three_year_window(self) -> None:
+    def test_company_stats_rejects_a_period_outside_six_quarter_window(self) -> None:
         self.cache_period(2026, 1, disclosure_rows())
         self._discover_latest_period_mock.return_value = (2026, 1)
 
         result = server.get_company_stats("Google", year=2023, quarter=1)
 
-        self.assertIn("outside the cached three-year window", result["error"])
+        self.assertIn("outside the cached six-quarter window", result["error"])
 
-    def test_recent_periods_cover_three_fiscal_years(self) -> None:
+    def test_recent_periods_cover_six_fiscal_quarters(self) -> None:
         server.data_manager.df = disclosure_rows()
         server.data_manager.loaded_year = 2026
         server.data_manager.loaded_quarter = 2
@@ -179,12 +180,10 @@ class H1BServerTests(unittest.TestCase):
             [
                 (2026, 2), (2026, 1),
                 (2025, 4), (2025, 3), (2025, 2), (2025, 1),
-                (2024, 4), (2024, 3), (2024, 2), (2024, 1),
-                (2023, 4), (2023, 3),
             ],
         )
 
-    def test_startup_cache_warms_twelve_quarters_and_restores_latest(self) -> None:
+    def test_startup_cache_warms_six_quarters_and_restores_latest(self) -> None:
         manager = server.H1BDataManager()
 
         def load_latest(*, force_download=False):
@@ -209,7 +208,7 @@ class H1BServerTests(unittest.TestCase):
         ):
             cached = manager.cache_recent_data()
 
-        self.assertEqual(len(cached), 12)
+        self.assertEqual(len(cached), 6)
         self.assertEqual(loaded[:-1], manager.recent_periods()[1:])
         self.assertEqual(loaded[-1], (2026, 2))
         self.assertEqual(manager.period_label(), "FY2026 Q2")
@@ -217,8 +216,7 @@ class H1BServerTests(unittest.TestCase):
     def test_company_sponsorship_trend_returns_all_cached_quarters(self) -> None:
         periods = [
             (2026, 1), (2025, 4), (2025, 3), (2025, 2),
-            (2025, 1), (2024, 4), (2024, 3), (2024, 2),
-            (2024, 1), (2023, 4), (2023, 3), (2023, 2),
+            (2025, 1), (2024, 4),
         ]
         for year, quarter in periods:
             rows = disclosure_rows()
@@ -229,8 +227,8 @@ class H1BServerTests(unittest.TestCase):
 
         result = server.get_company_sponsorship_trend("Google")
 
-        self.assertEqual(result["period_count"], 12)
-        self.assertEqual(result["window_years"], 3)
+        self.assertEqual(result["period_count"], 6)
+        self.assertEqual(result["window_years"], 1.5)
         self.assertEqual(result["missing_periods"], [])
         self.assertEqual(result["periods"][0]["period"], "FY2026 Q1")
         q4 = next(row for row in result["periods"] if row["period"] == "FY2025 Q4")
@@ -274,6 +272,71 @@ class H1BServerTests(unittest.TestCase):
         self.assertTrue(loaded)
         self.assertNotIn("nrows", read_excel.call_args.kwargs)
         self.assertTrue((Path(self._temp_dir.name) / "LCA_2026Q1.pkl").exists())
+
+    def test_concurrent_load_data_for_same_period_does_not_race(self) -> None:
+        """Two threads loading the same not-yet-cached period must not both
+        download at once: the background startup warmup and a concurrently
+        invoked MCP tool call share one H1BDataManager and would otherwise
+        both write to the same temp .xlsx path, corrupting each other's
+        download (observed in production as truncated files / "not a zip
+        file" errors on the newest quarter)."""
+        manager = server.H1BDataManager()
+        download_started = threading.Event()
+        release_download = threading.Event()
+        download_calls: list[str] = []
+
+        def fake_get(url, stream=True, timeout=None, headers=None):
+            download_calls.append(url)
+            if len(download_calls) == 1:
+                download_started.set()
+                # Hold the "network" open long enough that a second,
+                # concurrent caller would start its own download too if
+                # load_data() did not serialize per period.
+                self.assertTrue(release_download.wait(timeout=5))
+            response = Mock()
+            response.headers = {
+                "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }
+            response.raise_for_status.return_value = None
+            response.iter_content.return_value = [b"x" * 2_000]
+            return response
+
+        with patch.object(
+            manager,
+            "get_dol_urls",
+            return_value=["https://example.test/LCA_2026Q1.xlsx"],
+        ), patch.object(server.requests, "get", side_effect=fake_get), patch.object(
+            server.pd,
+            "read_excel",
+            return_value=disclosure_rows(),
+        ):
+            results: list[bool] = []
+
+            def worker() -> None:
+                results.append(manager.load_data(2026, 1))
+
+            first = threading.Thread(target=worker)
+            first.start()
+            self.assertTrue(download_started.wait(timeout=5))
+
+            second = threading.Thread(target=worker)
+            second.start()
+            # Give the second caller a chance to reach load_data(); if calls
+            # for the same period aren't serialized it will call
+            # requests.get a second time immediately instead of blocking.
+            time.sleep(0.1)
+            release_download.set()
+
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(
+            len(download_calls),
+            1,
+            "the second concurrent caller must reuse the first download's "
+            "cache instead of racing it on the shared temp file",
+        )
 
     def test_latest_load_uses_newest_cache_when_dol_is_unavailable(self) -> None:
         self.cache_default_disclosure()
@@ -473,7 +536,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertNotIn("current_period", result)
 
     def test_http_health_is_reachable_immediately_and_ready_after_warmup(self) -> None:
-        # The three-year cache warmup can take far longer than a platform
+        # The six-quarter cache warmup can take far longer than a platform
         # healthcheck timeout, so it must run in the background: /health has
         # to be reachable (even if "degraded") the instant the app starts,
         # not only after the warmup finishes.

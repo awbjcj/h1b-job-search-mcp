@@ -2,6 +2,7 @@
 import os
 import asyncio
 import re
+import threading
 import pandas as pd
 import requests
 import subprocess
@@ -27,8 +28,8 @@ LCA_DISCLOSURE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LATEST_DISCOVERY_LOOKBACK_YEARS = 5
-HISTORICAL_CACHE_YEARS = 3
-RECENT_SPONSORSHIP_QUARTERS = HISTORICAL_CACHE_YEARS * 4
+RECENT_SPONSORSHIP_QUARTERS = 6
+HISTORICAL_CACHE_YEARS = RECENT_SPONSORSHIP_QUARTERS / 4
 
 # These forms occur frequently in the FY2026 Q1 employer data. Canonicalizing
 # dotted abbreviations before removing legal suffixes keeps names such as
@@ -94,7 +95,23 @@ class H1BDataManager:
         self.latest_available_quarter = None
         self.latest_checked = None
         self.discovered_periods: list[tuple[int, int]] = []
-        
+        # The background startup warmup (asyncio.to_thread) and any MCP tool
+        # call run on separate threads and share this instance. Without a
+        # per-period lock, two threads downloading the same quarter both
+        # write to the identical temp .xlsx path and corrupt each other's
+        # download (observed as truncated files / "not a zip file" errors).
+        self._period_locks: dict[tuple[int, int], threading.Lock] = {}
+        self._period_locks_guard = threading.Lock()
+
+    def _lock_for_period(self, year: int, quarter: int) -> threading.Lock:
+        key = (year, quarter)
+        with self._period_locks_guard:
+            lock = self._period_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._period_locks[key] = lock
+            return lock
+
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
         urls = []
@@ -318,7 +335,7 @@ class H1BDataManager:
         return False
 
     def cache_recent_data(self, force_download: bool = False) -> list[tuple[int, int]]:
-        """Cache the latest three fiscal years and leave the newest period loaded.
+        """Cache the latest six fiscal quarters and leave the newest period loaded.
 
         Individual tool calls should remain cheap and query one quarter by
         default.  Startup performs this best-effort warmup once so every
@@ -361,6 +378,16 @@ class H1BDataManager:
         if quarter not in range(1, 5):
             raise ValueError("quarter must be between 1 and 4")
 
+        # Serialize per period: the background warmup thread and a
+        # concurrently-invoked MCP tool call can both reach this point for
+        # the same quarter. Without the lock they'd download to the same
+        # temp .xlsx path at once and corrupt each other's file. The second
+        # caller blocks here, then re-checks the cache below and reuses the
+        # first caller's now-written .pkl instead of downloading again.
+        with self._lock_for_period(year, quarter):
+            return self._load_period(year, quarter, force_download)
+
+    def _load_period(self, year: int, quarter: int, force_download: bool) -> bool:
         cache_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.pkl")
         
         # Try loading from cache first
@@ -460,7 +487,7 @@ class H1BDataManager:
                 print(f"Reading Excel file with pandas...")
                 try:
                     # Use openpyxl engine for .xlsx files. Read the complete
-                    # disclosure: the cache backs three years of selectable
+                    # disclosure: the cache backs six quarters of selectable
                     # periods, so silently clipping a quarter would make every
                     # count and chart derived from it incomplete.
                     self.df = pd.read_excel(excel_file, engine='openpyxl')
@@ -555,7 +582,7 @@ async def _warm_up_data_cache() -> None:
 
 @asynccontextmanager
 async def server_lifespan(_server):
-    # The three-year warmup downloads and parses up to a dozen multi-hundred
+    # The six-quarter warmup downloads and parses up to six multi-hundred
     # MB DOL spreadsheets, which can take well over Railway's healthcheck
     # timeout. Run it in the background so /health is reachable immediately
     # (reporting "degraded" until the warmup finishes) instead of the whole
@@ -932,7 +959,7 @@ def search_h1b_jobs(
         "Get statistics about a company's H-1B sponsorship data for one "
         "fiscal quarter. Defaults to the latest available quarter; pass both "
         "year and quarter to select another cached quarter from the past "
-        "three years."
+        "six quarters."
     )
 )
 def get_company_stats(
@@ -979,7 +1006,7 @@ def get_company_stats(
     if requested_period is not None and requested_period not in recent_periods:
         return {
             "error": (
-                "Requested period is outside the cached three-year window. "
+                "Requested period is outside the cached six-quarter window. "
                 "Use get_available_data to list selectable quarters."
             )
         }
@@ -1034,7 +1061,7 @@ def get_company_stats(
 @mcp.tool(
     description=(
         "Return quarterly H-1B filing counts for a company across the cached "
-        "three-year window. Use this compact series to plot sponsorship volume."
+        "six-quarter window. Use this compact series to plot sponsorship volume."
     )
 )
 def get_company_sponsorship_trend(company_name: str) -> dict:

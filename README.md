@@ -26,7 +26,7 @@ This server fetches **actual H-1B application data** directly from the U.S. Depa
 - 📈 **Top Sponsors**: List top H-1B sponsoring companies by volume
 - 🚫 **Agency Filtering**: Automatically filter out staffing agencies to find direct employers
 - 📁 **Export Results**: Export filtered results to CSV for easy outreach
-- 💾 **Three-year Data Cache**: Warms the latest 12 fiscal quarters at startup so period queries stay local
+- 💾 **Six-quarter Data Cache**: Warms the latest 6 fiscal quarters at startup so period queries stay local
 - 🤖 **Multi-LLM Support**: Works with Claude, ChatGPT, Gemini, Cursor, and Poke
 
 ## 📖 How to Use
@@ -72,7 +72,7 @@ the latest available quarter is used.
 
 ### 4. `get_company_sponsorship_trend`
 Return a compact, newest-first series of company filing counts across the cached
-three-year window. This is the chart-ready source for sponsorship-volume plots.
+six-quarter window. This is the chart-ready source for sponsorship-volume plots.
 - **Parameters**:
   - `company_name`: Company name to analyze
 

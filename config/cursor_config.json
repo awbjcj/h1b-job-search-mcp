@@ -25,7 +25,7 @@
           },
           {
             "name": "get_company_sponsorship_trend",
-            "description": "Get a chart-ready three-year company filing series"
+            "description": "Get a chart-ready six-quarter company filing series"
           },
           {
             "name": "get_top_sponsors",

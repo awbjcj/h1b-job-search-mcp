@@ -88,7 +88,7 @@
         },
         {
           "name": "get_company_sponsorship_trend",
-          "description": "Get a chart-ready three-year H-1B filing series for a company",
+          "description": "Get a chart-ready six-quarter H-1B filing series for a company",
           "inputSchema": {
             "type": "object",
             "required": ["company_name"],

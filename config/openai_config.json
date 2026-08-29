@@ -87,7 +87,7 @@
       "name": "get_company_sponsorship_trend",
       "endpoint": "/tool/get_company_sponsorship_trend",
       "method": "POST",
-      "description": "Get a chart-ready three-year H-1B filing series for a company",
+      "description": "Get a chart-ready six-quarter H-1B filing series for a company",
       "parameters": {
         "company_name": {
           "type": "string",
