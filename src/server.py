@@ -27,7 +27,8 @@ LCA_DISCLOSURE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 LATEST_DISCOVERY_LOOKBACK_YEARS = 5
-RECENT_SPONSORSHIP_QUARTERS = 4
+HISTORICAL_CACHE_YEARS = 3
+RECENT_SPONSORSHIP_QUARTERS = HISTORICAL_CACHE_YEARS * 4
 
 # These forms occur frequently in the FY2026 Q1 employer data. Canonicalizing
 # dotted abbreviations before removing legal suffixes keeps names such as
@@ -162,6 +163,35 @@ class H1BDataManager:
         periods = self.get_cached_periods()
         return periods[-1] if periods else None
 
+    def latest_known_period(self) -> tuple[int, int] | None:
+        """Return the published latest period, then cache/current fallbacks."""
+        if (
+            self.latest_available_year is not None
+            and self.latest_available_quarter is not None
+        ):
+            return self.latest_available_year, self.latest_available_quarter
+        return self.newest_cached_period() or (
+            (self.loaded_year, self.loaded_quarter)
+            if self.loaded_year is not None and self.loaded_quarter is not None
+            else None
+        )
+
+    @staticmethod
+    def periods_ending_at(
+        year: int,
+        quarter: int,
+        count: int = RECENT_SPONSORSHIP_QUARTERS,
+    ) -> list[tuple[int, int]]:
+        """Return ``count`` fiscal quarters, newest first, from an anchor."""
+        periods: list[tuple[int, int]] = []
+        for _ in range(max(0, count)):
+            periods.append((year, quarter))
+            quarter -= 1
+            if quarter == 0:
+                year -= 1
+                quarter = 4
+        return periods
+
     def _record_latest_period(self, period: tuple[int, int]) -> tuple[int, int]:
         self.latest_available_year, self.latest_available_quarter = period
         self.latest_checked = datetime.now()
@@ -287,6 +317,36 @@ class H1BDataManager:
 
         return False
 
+    def cache_recent_data(self, force_download: bool = False) -> list[tuple[int, int]]:
+        """Cache the latest three fiscal years and leave the newest period loaded.
+
+        Individual tool calls should remain cheap and query one quarter by
+        default.  Startup performs this best-effort warmup once so every
+        selectable quarter can subsequently be read from the local cache.
+        """
+        if not self.load_latest_data(force_download=force_download):
+            return []
+
+        anchor_year = self.loaded_year
+        anchor_quarter = self.loaded_quarter
+        if anchor_year is None or anchor_quarter is None:
+            return []
+
+        periods = [
+            (cast(int, year), cast(int, quarter))
+            for year, quarter in self.recent_periods()
+            if year is not None and quarter is not None
+        ]
+        cached: list[tuple[int, int]] = [periods[0]]
+        for period in periods[1:]:
+            if self.load_data(*period):
+                cached.append(period)
+
+        # A warmup walks backward through the cache. Restore the latest
+        # successfully loaded period so default queries always mean latest.
+        self.load_data(anchor_year, anchor_quarter)
+        return cached
+
     def load_data(
         self,
         year: int | None = None,
@@ -396,16 +456,19 @@ class H1BDataManager:
                     os.remove(excel_file)
                     continue
                 
-                # Read the Excel file (limit rows for performance)
+                # Read the complete Excel file.
                 print(f"Reading Excel file with pandas...")
                 try:
-                    # Use openpyxl engine for .xlsx files
-                    self.df = pd.read_excel(excel_file, engine='openpyxl', nrows=100000)
+                    # Use openpyxl engine for .xlsx files. Read the complete
+                    # disclosure: the cache backs three years of selectable
+                    # periods, so silently clipping a quarter would make every
+                    # count and chart derived from it incomplete.
+                    self.df = pd.read_excel(excel_file, engine='openpyxl')
                 except Exception as read_error:
                     print(f"Failed to read Excel with openpyxl: {read_error}")
                     # Try without specifying engine as fallback
                     try:
-                        self.df = pd.read_excel(excel_file, nrows=100000)
+                        self.df = pd.read_excel(excel_file)
                     except Exception as fallback_error:
                         print(f"Failed to read Excel file: {fallback_error}")
                         os.remove(excel_file)
@@ -471,16 +534,7 @@ class H1BDataManager:
         if self.loaded_year is None or self.loaded_quarter is None:
             return [(None, None)]
 
-        periods: list[tuple[int | None, int | None]] = []
-        year = self.loaded_year
-        quarter = self.loaded_quarter
-        for _ in range(count):
-            periods.append((year, quarter))
-            quarter -= 1
-            if quarter == 0:
-                year -= 1
-                quarter = 4
-        return periods
+        return self.periods_ending_at(self.loaded_year, self.loaded_quarter, count)
 
     def latest_period_label(self) -> str | None:
         if self.latest_available_year is None or self.latest_available_quarter is None:
@@ -492,8 +546,8 @@ data_manager = H1BDataManager()
 
 @asynccontextmanager
 async def server_lifespan(_server):
-    loaded = await asyncio.to_thread(data_manager.ensure_loaded)
-    if not loaded:
+    cached_periods = await asyncio.to_thread(data_manager.cache_recent_data)
+    if not cached_periods:
         print(
             "H-1B disclosure data is unavailable at startup; continuing with "
             "the server live so a later load can retry the DOL sources."
@@ -691,6 +745,17 @@ def _build_company_stats(
             if "CASE_STATUS" in company_df.columns
             else "N/A"
         ),
+        "denied": (
+            int(
+                company_df["CASE_STATUS"]
+                .astype(str)
+                .str.casefold()
+                .eq("denied")
+                .sum()
+            )
+            if "CASE_STATUS" in company_df.columns
+            else "N/A"
+        ),
         "fiscal_periods": [selected_period],
         "data_version": selected_period,
         "source_url": selected_source_url,
@@ -852,20 +917,32 @@ def search_h1b_jobs(
 
 @mcp.tool(
     description=(
-        "Get statistics about a company's latest H-1B sponsorship data, "
-        "searching the most recent four fiscal quarters."
+        "Get statistics about a company's H-1B sponsorship data for one "
+        "fiscal quarter. Defaults to the latest available quarter; pass both "
+        "year and quarter to select another cached quarter from the past "
+        "three years."
     )
 )
-def get_company_stats(company_name: str) -> Dict:
+def get_company_stats(
+    company_name: str,
+    year: Optional[int] = None,
+    quarter: Optional[int] = None,
+) -> Dict:
     """
-    Get detailed H-1B sponsorship statistics for the latest matching quarter.
+    Get detailed H-1B sponsorship statistics for one fiscal quarter.
 
     Args:
         company_name: Company name to search for
+        year: Optional fiscal year. Must be provided with quarter.
+        quarter: Optional quarter from 1 to 4. Must be provided with year.
 
     Returns:
         Statistics including sponsorship count, job titles, wages
     """
+    if (year is None) != (quarter is None):
+        return {"error": "year and quarter must be provided together"}
+    if quarter is not None and quarter not in range(1, 5):
+        return {"error": "quarter must be between 1 and 4"}
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
 
@@ -876,35 +953,124 @@ def get_company_stats(company_name: str) -> Dict:
     original_loaded_quarter = data_manager.loaded_quarter
     original_source_url = data_manager.source_url
 
-    periods = data_manager.recent_periods()
-    searched_periods: list[str] = []
+    latest_period = data_manager.latest_known_period()
+    recent_periods = (
+        data_manager.periods_ending_at(*latest_period)
+        if latest_period is not None
+        else []
+    )
+    requested_period = (
+        (cast(int, year), cast(int, quarter))
+        if year is not None and quarter is not None
+        else (recent_periods[0] if recent_periods else None)
+    )
+    if requested_period is not None and requested_period not in recent_periods:
+        return {
+            "error": (
+                "Requested period is outside the cached three-year window. "
+                "Use get_available_data to list selectable quarters."
+            )
+        }
+    period_label = (
+        f"FY{requested_period[0]} Q{requested_period[1]}"
+        if requested_period is not None
+        else (data_manager.period_label() or "currently loaded data")
+    )
 
     try:
-        for year, quarter in periods:
-            if year is None or quarter is None:
-                period_label = data_manager.period_label()
-                display_period = period_label or "currently loaded data"
+        if requested_period is None or requested_period == (
+            original_loaded_year,
+            original_loaded_quarter,
+        ):
+            period_df = data_manager.get_loaded_data()
+        elif not data_manager.load_data(*requested_period):
+            return {
+                "error": f"H-1B disclosure data is unavailable for {period_label}."
+            }
+        else:
+            period_df = data_manager.get_loaded_data()
+
+        employer_col = _get_employer_column(period_df)
+        company_df = _filter_company_rows(period_df, employer_col, company_name)
+        if company_df.empty:
+            return {
+                "message": f"No sponsorship data found for {company_name} in {period_label}.",
+                "searched_periods": [period_label],
+                "fiscal_periods": [period_label],
+                "data_version": period_label,
+                "latest_sponsorship_period": None,
+            }
+
+        stats = _build_company_stats(
+            company_df.copy(),
+            employer_col,
+            period_label=period_label,
+            source_url=data_manager.source_url,
+        )
+        stats["searched_periods"] = [period_label]
+        stats["latest_sponsorship_period"] = period_label
+        return stats
+    finally:
+        data_manager.df = original_df
+        data_manager.last_loaded = original_last_loaded
+        data_manager.current_file = original_current_file
+        data_manager.loaded_year = original_loaded_year
+        data_manager.loaded_quarter = original_loaded_quarter
+        data_manager.source_url = original_source_url
+
+
+@mcp.tool(
+    description=(
+        "Return quarterly H-1B filing counts for a company across the cached "
+        "three-year window. Use this compact series to plot sponsorship volume."
+    )
+)
+def get_company_sponsorship_trend(company_name: str) -> dict:
+    """Return newest-first quarterly filing figures for charting."""
+    if not data_manager.ensure_loaded():
+        return {"error": "H-1B disclosure data could not be loaded."}
+
+    original_df = data_manager.df
+    original_last_loaded = data_manager.last_loaded
+    original_current_file = data_manager.current_file
+    original_loaded_year = data_manager.loaded_year
+    original_loaded_quarter = data_manager.loaded_quarter
+    original_source_url = data_manager.source_url
+    periods: list[dict] = []
+    missing_periods: list[str] = []
+
+    try:
+        latest_period = data_manager.latest_known_period()
+        if latest_period is None:
+            return {
+                "company": company_name,
+                "periods": [],
+                "missing_periods": [],
+                "period_count": 0,
+                "window_years": HISTORICAL_CACHE_YEARS,
+            }
+        for year, quarter in data_manager.periods_ending_at(*latest_period):
+            period_label = f"FY{year} Q{quarter}"
+            if (year, quarter) == (original_loaded_year, original_loaded_quarter):
                 period_df = data_manager.get_loaded_data()
-            elif (year, quarter) == (original_loaded_year, original_loaded_quarter):
-                period_label = f"FY{year} Q{quarter}"
-                display_period = period_label
-                period_df = data_manager.get_loaded_data()
+            elif not data_manager.load_data(year, quarter):
+                missing_periods.append(period_label)
+                continue
             else:
-                period_label = f"FY{year} Q{quarter}"
-                display_period = period_label
-                if not data_manager.load_data(year, quarter):
-                    searched_periods.append(display_period)
-                    continue
                 period_df = data_manager.get_loaded_data()
 
-            searched_periods.append(display_period)
             employer_col = _get_employer_column(period_df)
-            company_df = _filter_company_rows(
-                period_df,
-                employer_col,
-                company_name,
-            )
+            company_df = _filter_company_rows(period_df, employer_col, company_name)
             if company_df.empty:
+                periods.append(
+                    {
+                        "period": period_label,
+                        "filing_count": 0,
+                        "certified_count": 0,
+                        "denied_count": 0,
+                        "wage_summary": None,
+                    }
+                )
                 continue
 
             stats = _build_company_stats(
@@ -913,9 +1079,15 @@ def get_company_stats(company_name: str) -> Dict:
                 period_label=period_label,
                 source_url=data_manager.source_url,
             )
-            stats["searched_periods"] = searched_periods
-            stats["latest_sponsorship_period"] = period_label
-            return stats
+            periods.append(
+                {
+                    "period": period_label,
+                    "filing_count": stats["total_applications"],
+                    "certified_count": stats.get("certified"),
+                    "denied_count": stats.get("denied"),
+                    "wage_summary": stats.get("wage_stats"),
+                }
+            )
     finally:
         data_manager.df = original_df
         data_manager.last_loaded = original_last_loaded
@@ -925,12 +1097,11 @@ def get_company_stats(company_name: str) -> Dict:
         data_manager.source_url = original_source_url
 
     return {
-        "message": (
-            f"No recent sponsorship data found for {company_name}. "
-            "Searched the latest four fiscal quarters: "
-            f"{', '.join(searched_periods)}."
-        ),
-        "searched_periods": searched_periods,
+        "company": company_name,
+        "periods": periods,
+        "missing_periods": missing_periods,
+        "period_count": len(periods),
+        "window_years": HISTORICAL_CACHE_YEARS,
     }
 
 @mcp.tool(description="Export filtered H-1B data to CSV file")
@@ -1412,6 +1583,7 @@ def get_available_data() -> Dict:
         "cache_directory": DATA_CACHE_DIR,
         "source_url": data_manager.source_url,
         "latest_period": data_manager.latest_period_label(),
+        "cache_window_years": HISTORICAL_CACHE_YEARS,
         "note": "LCA data is typically available with a 1-quarter delay"
     }
 
