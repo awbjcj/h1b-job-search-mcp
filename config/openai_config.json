@@ -72,6 +72,27 @@
           "type": "string",
           "required": true,
           "description": "Company name to search for"
+        },
+        "year": {
+          "type": "integer",
+          "description": "Optional fiscal year; provide with quarter, or omit both for the latest quarter"
+        },
+        "quarter": {
+          "type": "integer",
+          "description": "Optional quarter 1-4; provide with year"
+        }
+      }
+    },
+    {
+      "name": "get_company_sponsorship_trend",
+      "endpoint": "/tool/get_company_sponsorship_trend",
+      "method": "POST",
+      "description": "Get a chart-ready three-year H-1B filing series for a company",
+      "parameters": {
+        "company_name": {
+          "type": "string",
+          "required": true,
+          "description": "Company name to search for"
         }
       }
     },

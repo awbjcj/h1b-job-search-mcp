@@ -21,7 +21,11 @@
           },
           {
             "name": "get_company_stats",
-            "description": "Get company H-1B sponsorship statistics"
+            "description": "Get company H-1B sponsorship statistics for the latest or a selected quarter"
+          },
+          {
+            "name": "get_company_sponsorship_trend",
+            "description": "Get a chart-ready three-year company filing series"
           },
           {
             "name": "get_top_sponsors",

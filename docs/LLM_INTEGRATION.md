@@ -23,6 +23,7 @@ All platforms have access to the same set of tools:
 - `load_h1b_data`: Download and load H-1B LCA disclosure data
 - `search_h1b_jobs`: Search for H-1B sponsoring companies
 - `get_company_stats`: Get detailed sponsorship statistics
+- `get_company_sponsorship_trend`: Get a chart-ready three-year filing series
 - `get_top_sponsors`: List top H-1B sponsors by volume
 - `export_results`: Export search results to CSV
 - `get_available_data`: Check available data periods
@@ -170,9 +171,35 @@ paths:
               properties:
                 company_name:
                   type: string
+                year:
+                  type: integer
+                  description: Optional fiscal year; provide with quarter, or omit both for the latest quarter
+                quarter:
+                  type: integer
+                  minimum: 1
+                  maximum: 4
+                  description: Optional fiscal quarter; provide with year
       responses:
         200:
           description: Company statistics
+
+  /tool/get_company_sponsorship_trend:
+    post:
+      summary: Get a three-year company H-1B filing series
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - company_name
+              properties:
+                company_name:
+                  type: string
+      responses:
+        200:
+          description: Newest-first quarterly filing counts for plotting
 
   /tool/get_top_sponsors:
     post:
@@ -400,6 +427,7 @@ Open Poke and navigate to Settings → MCP Servers
       "load_h1b_data",
       "search_h1b_jobs",
       "get_company_stats",
+      "get_company_sponsorship_trend",
       "get_top_sponsors",
       "export_results",
       "get_available_data"

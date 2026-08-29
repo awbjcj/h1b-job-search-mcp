@@ -26,7 +26,7 @@ This server fetches **actual H-1B application data** directly from the U.S. Depa
 - 📈 **Top Sponsors**: List top H-1B sponsoring companies by volume
 - 🚫 **Agency Filtering**: Automatically filter out staffing agencies to find direct employers
 - 📁 **Export Results**: Export filtered results to CSV for easy outreach
-- 💾 **Data Caching**: Intelligent caching to avoid re-downloading large datasets
+- 💾 **Three-year Data Cache**: Warms the latest 12 fiscal quarters at startup so period queries stay local
 - 🤖 **Multi-LLM Support**: Works with Claude, ChatGPT, Gemini, Cursor, and Poke
 
 ## 📖 How to Use
@@ -63,17 +63,26 @@ Each returned position includes `company_stats`, calculated across all loaded
 positions for that employer rather than only the filtered search results.
 
 ### 3. `get_company_stats`
-Get detailed H-1B sponsorship statistics for a specific company.
+Get detailed H-1B sponsorship statistics for one quarter. With no period options,
+the latest available quarter is used.
+- **Parameters**:
+  - `company_name`: Company name to analyze
+  - `year`: Fiscal year (optional; provide together with `quarter`)
+  - `quarter`: Quarter 1-4 (optional; provide together with `year`)
+
+### 4. `get_company_sponsorship_trend`
+Return a compact, newest-first series of company filing counts across the cached
+three-year window. This is the chart-ready source for sponsorship-volume plots.
 - **Parameters**:
   - `company_name`: Company name to analyze
 
-### 4. `get_top_sponsors`
+### 5. `get_top_sponsors`
 List top H-1B sponsoring companies by application volume.
 - **Parameters**:
   - `limit`: Number of companies to return
   - `exclude_agencies`: Exclude staffing agencies
 
-### 5. `export_results`
+### 6. `export_results`
 Export filtered H-1B results to a CSV file.
 - **Parameters**:
   - `job_role`: Job title to filter
@@ -82,10 +91,10 @@ Export filtered H-1B results to a CSV file.
   - `filename`: Output filename
   - `max_results`: Maximum results to export
 
-### 6. `get_available_data`
+### 7. `get_available_data`
 Check available LCA data periods and cached files.
 
-### 7. `ask` (Natural Language Interface) 🎯
+### 8. `ask` (Natural Language Interface) 🎯
 Talk to the H-1B search in simple English!
 - **Usage**: Just describe what you want in plain language
 - **Examples**:
@@ -146,7 +155,9 @@ supported when this server is run by itself.
 3. **Get company details**:
    ```
    Tool: get_company_stats
-   Parameters: {"company_name": "Google"}
+   Parameters: {"company_name": "Google"}  # latest quarter
+   # Or select one cached quarter:
+   Parameters: {"company_name": "Google", "year": 2025, "quarter": 4}
    ```
 
 4. **Export results**:

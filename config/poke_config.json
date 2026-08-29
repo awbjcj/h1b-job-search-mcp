@@ -74,6 +74,27 @@
             "properties": {
               "company_name": {
                 "type": "string"
+              },
+              "year": {
+                "type": "integer"
+              },
+              "quarter": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 4
+              }
+            }
+          }
+        },
+        {
+          "name": "get_company_sponsorship_trend",
+          "description": "Get a chart-ready three-year H-1B filing series for a company",
+          "inputSchema": {
+            "type": "object",
+            "required": ["company_name"],
+            "properties": {
+              "company_name": {
+                "type": "string"
               }
             }
           }
