@@ -4,6 +4,8 @@ import threading
 import time
 import unittest
 import warnings
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -35,6 +37,14 @@ def disclosure_rows(*, case_status: str = "Certified") -> pd.DataFrame:
             }
         ]
     )
+
+
+def xlsx_payload() -> bytes:
+    """Return a minimal ZIP payload so download tests pass XLSX validation."""
+    payload = BytesIO()
+    with zipfile.ZipFile(payload, "w") as archive:
+        archive.writestr("[Content_Types].xml", b"x" * 2_000)
+    return payload.getvalue()
 
 
 class H1BServerTests(unittest.TestCase):
@@ -213,6 +223,35 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(loaded[-1], (2026, 2))
         self.assertEqual(manager.period_label(), "FY2026 Q2")
 
+    def test_latest_load_evicts_periods_older_than_latest_six(self) -> None:
+        manager = server.H1BDataManager()
+        cached_periods = [
+            (2026, 3), (2026, 2), (2026, 1),
+            (2025, 4), (2025, 3), (2025, 2), (2025, 1),
+        ]
+        for period in cached_periods:
+            self.cache_disclosure(*period)
+        stale_excel = Path(self._temp_dir.name) / "LCA_2024Q4.xlsx"
+        stale_excel.write_bytes(b"partial download")
+
+        with patch.object(
+            manager,
+            "discover_latest_period",
+            return_value=(2026, 3),
+        ):
+            loaded = manager.load_latest_data()
+
+        self.assertTrue(loaded)
+        self.assertEqual(
+            manager.get_cached_periods(),
+            [
+                (2025, 2), (2025, 3), (2025, 4),
+                (2026, 1), (2026, 2), (2026, 3),
+            ],
+        )
+        self.assertFalse((Path(self._temp_dir.name) / "LCA_2025Q1.pkl").exists())
+        self.assertFalse(stale_excel.exists())
+
     def test_company_sponsorship_trend_returns_all_cached_quarters(self) -> None:
         periods = [
             (2026, 1), (2025, 4), (2025, 3), (2025, 2),
@@ -255,7 +294,7 @@ class H1BServerTests(unittest.TestCase):
             "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
         response.raise_for_status.return_value = None
-        response.iter_content.return_value = [b"x" * 2_000]
+        response.iter_content.return_value = [xlsx_payload()]
         manager = server.H1BDataManager()
 
         with patch.object(
@@ -298,7 +337,7 @@ class H1BServerTests(unittest.TestCase):
                 "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             }
             response.raise_for_status.return_value = None
-            response.iter_content.return_value = [b"x" * 2_000]
+            response.iter_content.return_value = [xlsx_payload()]
             return response
 
         with patch.object(
@@ -489,6 +528,43 @@ class H1BServerTests(unittest.TestCase):
             period = server.H1BDataManager().discover_latest_period()
 
         self.assertEqual(period, (2026, 2))
+
+    def test_discover_latest_period_prioritizes_the_published_url(self) -> None:
+        response = Mock()
+        response.text = """
+            <a href="/media/LCA_Disclosure_Data_FY2026_Q3.xlsx">Latest</a>
+        """
+
+        with patch.object(server.requests, "get", return_value=response):
+            manager = server.H1BDataManager()
+            period = manager.discover_latest_period()
+
+        self.assertEqual(period, (2026, 3))
+        self.assertEqual(
+            manager.get_dol_urls(2026, 3)[0],
+            "https://www.dol.gov/media/LCA_Disclosure_Data_FY2026_Q3.xlsx",
+        )
+
+    def test_invalid_xlsx_payload_is_rejected_before_pandas_reads_it(self) -> None:
+        response = Mock()
+        response.headers = {"content-type": "application/octet-stream"}
+        response.raise_for_status.return_value = None
+        response.iter_content.return_value = [b"<html>not an excel file</html>" * 500]
+        manager = server.H1BDataManager()
+
+        with patch.object(
+            manager,
+            "get_dol_urls",
+            return_value=["https://example.test/LCA_2026Q3.xlsx"],
+        ), patch.object(server.requests, "get", return_value=response), patch.object(
+            server.pd,
+            "read_excel",
+        ) as read_excel:
+            loaded = manager.load_data(2026, 3)
+
+        self.assertFalse(loaded)
+        read_excel.assert_not_called()
+        self.assertFalse((Path(self._temp_dir.name) / "LCA_2026Q3.xlsx").exists())
 
     def test_company_stats_identifies_the_loaded_disclosure_period(self) -> None:
         self.cache_default_disclosure()

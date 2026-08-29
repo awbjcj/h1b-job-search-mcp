@@ -2,21 +2,22 @@
 
 An MCP (Model Context Protocol) server that automates H-1B job searching using **REAL** U.S. Department of Labor LCA disclosure data. Built with [FastMCP](https://github.com/jlowin/fastmcp).
 
-🚀 **Live Server**: https://h1b-job-search-mcp.onrender.com/mcp
+🚀 **Live Server**: <https://h1b-job-search-mcp.onrender.com/mcp>
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/aryaminus/h1b-job-search-mcp)
 
 Note: Due to limitation of memory on the free instance, the server tends to go down. I'm happy to accept server donations for hosting.
 
-## ✅ Real Data, Not Samples!
+## ✅ Real Data, Not Samples
 
 This server fetches **actual H-1B application data** directly from the U.S. Department of Labor's official disclosure files. Each dataset contains tens of thousands of real H-1B applications with:
+
 - Real company names (Google, Microsoft, Amazon, etc.)
 - Actual job titles and salaries
 - Real work locations and contact information
 - Certified application statuses
 
-**Data Source**: https://www.dol.gov/agencies/eta/foreign-labor/performance
+**Data Source**: <https://www.dol.gov/agencies/eta/foreign-labor/performance>
 
 ## Features
 
@@ -26,7 +27,7 @@ This server fetches **actual H-1B application data** directly from the U.S. Depa
 - 📈 **Top Sponsors**: List top H-1B sponsoring companies by volume
 - 🚫 **Agency Filtering**: Automatically filter out staffing agencies to find direct employers
 - 📁 **Export Results**: Export filtered results to CSV for easy outreach
-- 💾 **Six-quarter Data Cache**: Warms the latest 6 fiscal quarters at startup so period queries stay local
+- 💾 **Rolling Six-quarter Data Cache**: Warms the latest 6 fiscal quarters at startup and evicts quarters that fall outside the window
 - 🤖 **Multi-LLM Support**: Works with Claude, ChatGPT, Gemini, Cursor, and Poke
 
 ## 📖 How to Use
@@ -34,7 +35,9 @@ This server fetches **actual H-1B application data** directly from the U.S. Depa
 For detailed usage examples and natural language prompts, see the **[Usage Guide](USAGE_GUIDE.md)**.
 
 ### Quick Examples
+
 Just talk naturally! The `ask` tool understands plain English:
+
 - "Load the latest H-1B data"
 - "Find software engineer jobs in California paying over 150k"
 - "Tell me about Google's H-1B sponsorships"
@@ -43,14 +46,18 @@ Just talk naturally! The `ask` tool understands plain English:
 ## Available MCP Tools
 
 ### 1. `load_h1b_data`
+
 Download and load H-1B LCA data from the Department of Labor.
+
 - **Parameters**:
   - `year`: Fiscal year (provide with `quarter`, or omit both to discover the latest available period)
   - `quarter`: Quarter 1-4 (provide with `year`, or omit both to discover the latest available period)
   - `force_download`: Force re-download even if cached
 
 ### 2. `search_h1b_jobs`
+
 Search for H-1B sponsoring companies by job role and location.
+
 - **Parameters**:
   - `job_role`: Job title to search (e.g., "Software Engineer")
   - `city`: Work city (optional)
@@ -63,27 +70,35 @@ Each returned position includes `company_stats`, calculated across all loaded
 positions for that employer rather than only the filtered search results.
 
 ### 3. `get_company_stats`
+
 Get detailed H-1B sponsorship statistics for one quarter. With no period options,
 the latest available quarter is used.
+
 - **Parameters**:
   - `company_name`: Company name to analyze
   - `year`: Fiscal year (optional; provide together with `quarter`)
   - `quarter`: Quarter 1-4 (optional; provide together with `year`)
 
 ### 4. `get_company_sponsorship_trend`
+
 Return a compact, newest-first series of company filing counts across the cached
 six-quarter window. This is the chart-ready source for sponsorship-volume plots.
+
 - **Parameters**:
   - `company_name`: Company name to analyze
 
 ### 5. `get_top_sponsors`
+
 List top H-1B sponsoring companies by application volume.
+
 - **Parameters**:
   - `limit`: Number of companies to return
   - `exclude_agencies`: Exclude staffing agencies
 
 ### 6. `export_results`
+
 Export filtered H-1B results to a CSV file.
+
 - **Parameters**:
   - `job_role`: Job title to filter
   - `city`: City filter (optional)
@@ -92,10 +107,13 @@ Export filtered H-1B results to a CSV file.
   - `max_results`: Maximum results to export
 
 ### 7. `get_available_data`
+
 Check available LCA data periods and cached files.
 
 ### 8. `ask` (Natural Language Interface) 🎯
+
 Talk to the H-1B search in simple English!
+
 - **Usage**: Just describe what you want in plain language
 - **Examples**:
   - "I'm a software engineer looking for jobs in the Bay Area"
@@ -125,7 +143,7 @@ python src/server.py
 npx @modelcontextprotocol/inspector
 ```
 
-Open http://localhost:3000 and connect to `http://localhost:8000/mcp` using "Streamable HTTP" transport.
+Open <http://localhost:3000> and connect to `http://localhost:8000/mcp` using "Streamable HTTP" transport.
 
 For the sibling resume-agent development stack, the root repository's
 `make dev` target starts this server on `H1B_HOST=127.0.0.1` and
@@ -136,12 +154,14 @@ supported when this server is run by itself.
 ### Example Usage Flow
 
 1. **Load the data**:
+
    ```
    Tool: load_h1b_data
    Parameters: `{}` to discover and load the latest available period, or specify `year` and `quarter` explicitly.
    ```
 
 2. **Search for jobs**:
+
    ```
    Tool: search_h1b_jobs
    Parameters: {
@@ -153,6 +173,7 @@ supported when this server is run by itself.
    ```
 
 3. **Get company details**:
+
    ```
    Tool: get_company_stats
    Parameters: {"company_name": "Google"}  # latest quarter
@@ -161,6 +182,7 @@ supported when this server is run by itself.
    ```
 
 4. **Export results**:
+
    ```
    Tool: export_results
    Parameters: {
@@ -173,9 +195,11 @@ supported when this server is run by itself.
 ## Deployment
 
 ### Option 1: Deploy to Render
+
 Click the "Deploy to Render" button above.
 
 ### Option 2: Manual Deployment
+
 1. Fork this repository
 2. Connect your GitHub account to Render
 3. Create a new Web Service on Render
@@ -193,6 +217,7 @@ This MCP server works with multiple LLM platforms. For detailed integration inst
 ### Quick Setup by Platform
 
 #### Claude Desktop
+
 ```json
 {
   "mcpServers": {
@@ -205,15 +230,19 @@ This MCP server works with multiple LLM platforms. For detailed integration inst
 ```
 
 #### ChatGPT/OpenAI
+
 Run server with `PORT=8000 python src/server.py` and use the OpenAPI schema in [config/openai_config.json](config/openai_config.json).
 
 #### Google Gemini
+
 Configure with function declarations using [config/gemini_config.json](config/gemini_config.json).
 
 #### Cursor IDE
+
 Place [config/cursor_config.json](config/cursor_config.json) in `.cursor/mcp-config.json` and reload.
 
 #### Interaction Poke
+
 Use [config/poke_config.json](config/poke_config.json) in Poke settings.
 
 See [docs/LLM_INTEGRATION.md](docs/LLM_INTEGRATION.md) for complete setup guides, testing procedures, and troubleshooting.
@@ -221,6 +250,7 @@ See [docs/LLM_INTEGRATION.md](docs/LLM_INTEGRATION.md) for complete setup guides
 ## Data Source
 
 This tool uses publicly available LCA disclosure data from the U.S. Department of Labor's Foreign Labor Certification Data Center. The data includes:
+
 - Employer information
 - Job titles and wages
 - Work locations

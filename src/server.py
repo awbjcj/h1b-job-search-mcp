@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-import os
 import asyncio
+import os
 import re
+import subprocess
 import threading
+import unicodedata
+import zipfile
+from collections.abc import Sequence
+from contextlib import asynccontextmanager
+from datetime import datetime
+from html import unescape
+from typing import Any, Dict, Optional, cast
+from urllib.parse import urljoin, urlsplit, urlunsplit
+
 import pandas as pd
 import requests
-import subprocess
-import unicodedata
-from contextlib import asynccontextmanager
-from io import StringIO
-from typing import Any, Dict, Optional, cast
-from datetime import datetime
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -25,6 +29,14 @@ DOL_REQUEST_HEADERS = {
 }
 LCA_DISCLOSURE_PATTERN = re.compile(
     r"LCA_Dis(?:l)?closure_Data_FY(20\d{2})_Q([1-4])\.xlsx",
+    re.IGNORECASE,
+)
+LCA_DISCLOSURE_LINK_PATTERN = re.compile(
+    r'''href\s*=\s*["']([^"']*LCA_Dis(?:l)?closure_Data_FY20\d{2}_Q[1-4]\.xlsx[^"']*)["']''',
+    re.IGNORECASE,
+)
+CACHE_ARTIFACT_PATTERN = re.compile(
+    r"LCA_(\d{4})Q([1-4])\.(pkl|xlsx)",
     re.IGNORECASE,
 )
 LATEST_DISCOVERY_LOOKBACK_YEARS = 5
@@ -95,6 +107,7 @@ class H1BDataManager:
         self.latest_available_quarter = None
         self.latest_checked = None
         self.discovered_periods: list[tuple[int, int]] = []
+        self.discovered_urls: dict[tuple[int, int], list[str]] = {}
         # The background startup warmup (asyncio.to_thread) and any MCP tool
         # call run on separate threads and share this instance. Without a
         # per-period lock, two threads downloading the same quarter both
@@ -114,7 +127,10 @@ class H1BDataManager:
 
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
-        urls = []
+        # Prefer the exact href published by DOL. The newest disclosures have
+        # moved between the legacy /oflc/pdfs path and /media, and some file
+        # names contain DOL's long-standing "Dislclosure" typo.
+        urls = list(self.discovered_urls.get((year, quarter), []))
         
         # Base URL for DOL OFLC PDFs directory
         base_dol = "https://www.dol.gov/sites/dolgov/files/ETA/oflc/pdfs"
@@ -161,7 +177,9 @@ class H1BDataManager:
         # (currently down due to funding lapse)
         urls.append(f"https://www.flcdatacenter.com/download/LCA_{year}Q{quarter}.xlsx")
         
-        return urls
+        # Preserve priority while avoiding duplicate attempts when the exact
+        # discovered URL is also one of the generated compatibility URLs.
+        return list(dict.fromkeys(urls))
     
     def get_cached_periods(self) -> list[tuple[int, int]]:
         """Return cached fiscal periods ordered from oldest to newest."""
@@ -179,6 +197,48 @@ class H1BDataManager:
         """Return the newest cached fiscal period, if one exists."""
         periods = self.get_cached_periods()
         return periods[-1] if periods else None
+
+    def prune_cache(
+        self,
+        keep_periods: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        """Delete cached artifacts outside the current six-quarter window."""
+        if not os.path.exists(DATA_CACHE_DIR):
+            return []
+
+        keep = set(keep_periods)
+        stale_periods: set[tuple[int, int]] = set()
+        for file_name in os.listdir(DATA_CACHE_DIR):
+            match = CACHE_ARTIFACT_PATTERN.fullmatch(file_name)
+            if match is not None:
+                period = (int(match.group(1)), int(match.group(2)))
+                if period not in keep:
+                    stale_periods.add(period)
+
+        removed: set[tuple[int, int]] = set()
+        for period in stale_periods:
+            # Coordinate with load_data so an active read/download for the
+            # same period finishes before its stale artifact is removed.
+            with self._lock_for_period(*period):
+                for extension in ("pkl", "xlsx"):
+                    artifact_path = os.path.join(
+                        DATA_CACHE_DIR,
+                        f"LCA_{period[0]}Q{period[1]}.{extension}",
+                    )
+                    try:
+                        os.remove(artifact_path)
+                        removed.add(period)
+                    except FileNotFoundError:
+                        pass
+                    except OSError as error:
+                        print(
+                            "Could not remove stale cache artifact "
+                            f"{artifact_path}: {error}"
+                        )
+
+        for year, quarter in sorted(removed):
+            print(f"Removed stale LCA cache for FY{year} Q{quarter}")
+        return sorted(removed)
 
     def latest_known_period(self) -> tuple[int, int] | None:
         """Return the published latest period, then cache/current fallbacks."""
@@ -228,12 +288,35 @@ class H1BDataManager:
                 timeout=30,
             )
             response.raise_for_status()
+            discovered_urls: dict[tuple[int, int], list[str]] = {}
+            for href in LCA_DISCLOSURE_LINK_PATTERN.findall(response.text):
+                match = LCA_DISCLOSURE_PATTERN.search(href)
+                if match is None:
+                    continue
+                period = (int(match.group(1)), int(match.group(2)))
+                discovered_url = urljoin(DOL_PERFORMANCE_URL, unescape(href))
+                parsed_url = urlsplit(discovered_url)
+                discovered_url = urlunsplit(
+                    (
+                        parsed_url.scheme,
+                        parsed_url.netloc,
+                        re.sub(r"/{2,}", "/", parsed_url.path),
+                        parsed_url.query,
+                        parsed_url.fragment,
+                    )
+                )
+                discovered_urls.setdefault(period, []).append(discovered_url)
+
             periods = {
                 (int(year), int(quarter))
                 for year, quarter in LCA_DISCLOSURE_PATTERN.findall(response.text)
             }
             if periods:
                 self.discovered_periods = sorted(periods, reverse=True)
+                self.discovered_urls = {
+                    period: list(dict.fromkeys(urls))
+                    for period, urls in discovered_urls.items()
+                }
                 return self._record_latest_period(max(periods))
             print("DOL performance page did not list any LCA disclosure files")
         except requests.exceptions.RequestException as error:
@@ -242,6 +325,7 @@ class H1BDataManager:
             print(f"Could not parse the DOL performance page: {error}")
 
         self.discovered_periods = []
+        self.discovered_urls = {}
         return self._probe_latest_periods()
 
     def _probe_latest_periods(self) -> tuple[int, int] | None:
@@ -330,6 +414,7 @@ class H1BDataManager:
                 *period,
                 force_download=force_download if index == 0 else False,
             ):
+                self.prune_cache(self.periods_ending_at(*period))
                 return True
 
         return False
@@ -421,11 +506,22 @@ class H1BDataManager:
                         print(f"  Using curl to download from DOL...")
                         # Use curl which handles DOL's security better
                         curl_cmd = [
-                            'curl', '-s', '-L', '-o', excel_file,
+                            'curl', '-sS', '--fail', '-L', '-o', excel_file,
                             '--max-time', '300',
                             url
                         ]
-                        result = subprocess.run(curl_cmd, capture_output=True, text=True, timeout=310)
+                        result = subprocess.run(
+                            curl_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=310,
+                            check=False,
+                        )
+
+                        if result.returncode != 0:
+                            print(f"Curl download failed for {url}: {result.stderr.strip()}")
+                            if os.path.exists(excel_file):
+                                os.remove(excel_file)
                         
                         # Check if file was downloaded successfully
                         if os.path.exists(excel_file):
@@ -480,6 +576,15 @@ class H1BDataManager:
                 
                 if file_size < 1000:
                     print(f"Error: File too small ({file_size} bytes), likely not valid")
+                    os.remove(excel_file)
+                    continue
+
+                # DOL can return an HTML error/interstitial with HTTP 200 and
+                # a misleadingly large body. An .xlsx file is a ZIP archive;
+                # reject invalid payloads before pandas/openpyxl tries to read
+                # them and emits "File is not a zip file".
+                if not zipfile.is_zipfile(excel_file):
+                    print(f"Downloaded payload is not a valid XLSX file from {url}, skipping...")
                     os.remove(excel_file)
                     continue
                 
@@ -553,7 +658,7 @@ class H1BDataManager:
     def recent_periods(
         self,
         count: int = RECENT_SPONSORSHIP_QUARTERS,
-    ) -> list[tuple[int | None, int | None]]:
+    ) -> Sequence[tuple[int | None, int | None]]:
         """Return the loaded fiscal period and its preceding quarters."""
         if count < 1 or not self.is_loaded():
             return []
