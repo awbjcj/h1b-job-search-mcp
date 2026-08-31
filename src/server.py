@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio
+import gc
 import os
 import re
 import subprocess
@@ -7,8 +8,9 @@ import threading
 import unicodedata
 import zipfile
 from collections.abc import Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
+from functools import wraps
 from html import unescape
 from typing import Any, Dict, Optional, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -108,6 +110,11 @@ class H1BDataManager:
         self.latest_checked = None
         self.discovered_periods: list[tuple[int, int]] = []
         self.discovered_urls: dict[tuple[int, int], list[str]] = {}
+        # FastMCP runs synchronous tools in worker threads while startup uses
+        # asyncio.to_thread. Keep one process-wide owner for the single
+        # in-memory disclosure DataFrame. Re-entrancy permits tool composition
+        # such as export_results -> search_h1b_jobs.
+        self._data_lock = threading.RLock()
         # The background startup warmup (asyncio.to_thread) and any MCP tool
         # call run on separate threads and share this instance. Without a
         # per-period lock, two threads downloading the same quarter both
@@ -124,6 +131,25 @@ class H1BDataManager:
                 lock = threading.Lock()
                 self._period_locks[key] = lock
             return lock
+
+    @contextmanager
+    def operation(self):
+        """Serialize access to the single mutable in-memory DataFrame."""
+        with self._data_lock:
+            yield
+
+    def _discard_loaded_data(self) -> None:
+        """Release the current frame before loading another full quarter."""
+        self.df = None
+        self.last_loaded = None
+        self.current_file = None
+        self.loaded_year = None
+        self.loaded_quarter = None
+        self.source_url = None
+        # Each disclosure frame can occupy multiple GB. Reclaim cyclic
+        # garbage before pandas allocates its replacement so period switches
+        # do not briefly retain two full quarters.
+        gc.collect()
 
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
@@ -463,17 +489,30 @@ class H1BDataManager:
         if quarter not in range(1, 5):
             raise ValueError("quarter must be between 1 and 4")
 
-        # Serialize per period: the background warmup thread and a
-        # concurrently-invoked MCP tool call can both reach this point for
-        # the same quarter. Without the lock they'd download to the same
-        # temp .xlsx path at once and corrupt each other's file. The second
-        # caller blocks here, then re-checks the cache below and reuses the
-        # first caller's now-written .pkl instead of downloading again.
-        with self._lock_for_period(year, quarter):
-            return self._load_period(year, quarter, force_download)
+        with self._data_lock:
+            # Reuse the resident frame. Previously every request reopened the
+            # same pickle, allowing concurrent calls to retain duplicate
+            # multi-GB DataFrames until garbage collection caught up.
+            if (
+                not force_download
+                and self.df is not None
+                and (self.loaded_year, self.loaded_quarter) == (year, quarter)
+            ):
+                return True
+
+            # Retain the period lock as a second line of defence for cache-file
+            # writes. The data lock also prevents queries from observing a
+            # frame while another thread switches periods.
+            with self._lock_for_period(year, quarter):
+                return self._load_period(year, quarter, force_download)
 
     def _load_period(self, year: int, quarter: int, force_download: bool) -> bool:
         cache_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.pkl")
+
+        # Maintain the one-frame invariant while pandas deserializes the
+        # replacement. On failure the durable pickle remains available for a
+        # later retry, while the manager truthfully reports itself unloaded.
+        self._discard_loaded_data()
         
         # Try loading from cache first
         if not force_download and os.path.exists(cache_file):
@@ -640,6 +679,18 @@ class H1BDataManager:
     def ensure_loaded(self) -> bool:
         """Load the latest disclosure period when a fresh process has no data."""
         return self.is_loaded() or self.load_latest_data()
+
+    def ensure_latest_loaded(self) -> bool:
+        """Ensure unscoped searches use the newest known disclosure period."""
+        latest_period = self.latest_known_period()
+        if latest_period is None:
+            return self.is_loaded() or self.load_latest_data()
+        if self.is_loaded() and (
+            self.loaded_year,
+            self.loaded_quarter,
+        ) == latest_period:
+            return True
+        return self.load_data(*latest_period)
     
     def is_loaded(self) -> bool:
         return self.df is not None
@@ -674,6 +725,16 @@ class H1BDataManager:
         return f"FY{self.latest_available_year} Q{self.latest_available_quarter}"
 
 data_manager = H1BDataManager()
+
+
+def serialized_data_access(function):
+    """Keep each MCP operation on the manager's single resident frame."""
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        with data_manager.operation():
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 async def _warm_up_data_cache() -> None:
@@ -720,6 +781,7 @@ async def health_check(_request: Request) -> JSONResponse:
         "latest available period."
     )
 )
+@serialized_data_access
 def load_h1b_data(
     year: Optional[int] = None,
     quarter: Optional[int] = None,
@@ -942,6 +1004,7 @@ def _build_company_stats(
         "loaded positions for that employer."
     )
 )
+@serialized_data_access
 def search_h1b_jobs(
     job_role: str,
     city: Optional[str] = None,
@@ -964,11 +1027,11 @@ def search_h1b_jobs(
     Returns:
         List of matching employers with details
     """
-    if not data_manager.ensure_loaded():
+    if not data_manager.ensure_latest_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
     
-    all_df = data_manager.get_loaded_data().copy()
-    df = all_df.copy()
+    all_df = data_manager.get_loaded_data()
+    df = all_df
 
     employer_col = _get_employer_column(all_df)
     
@@ -1000,8 +1063,8 @@ def search_h1b_jobs(
             break
     
     if min_wage and wage_col:
-        df[wage_col] = pd.to_numeric(df[wage_col], errors='coerce')
-        df = df[df[wage_col] >= min_wage]
+        wages = pd.to_numeric(df[wage_col], errors='coerce')
+        df = df[wages >= min_wage]
     
     if skip_agencies and 'EMPLOYER_NAME' in df.columns:
         agency_keywords = [
@@ -1067,6 +1130,7 @@ def search_h1b_jobs(
         "six quarters."
     )
 )
+@serialized_data_access
 def get_company_stats(
     company_name: str,
     year: Optional[int] = None,
@@ -1090,12 +1154,10 @@ def get_company_stats(
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
 
-    original_df = data_manager.df
-    original_last_loaded = data_manager.last_loaded
-    original_current_file = data_manager.current_file
-    original_loaded_year = data_manager.loaded_year
-    original_loaded_quarter = data_manager.loaded_quarter
-    original_source_url = data_manager.source_url
+    original_period = (
+        cast(int, data_manager.loaded_year),
+        cast(int, data_manager.loaded_quarter),
+    )
 
     latest_period = data_manager.latest_known_period()
     recent_periods = (
@@ -1122,21 +1184,16 @@ def get_company_stats(
     )
 
     try:
-        if requested_period is None or requested_period == (
-            original_loaded_year,
-            original_loaded_quarter,
-        ):
-            period_df = data_manager.get_loaded_data()
-        elif not data_manager.load_data(*requested_period):
+        if requested_period is not None and requested_period != (
+            data_manager.loaded_year,
+            data_manager.loaded_quarter,
+        ) and not data_manager.load_data(*requested_period):
             return {
                 "error": f"H-1B disclosure data is unavailable for {period_label}."
             }
-        else:
-            period_df = data_manager.get_loaded_data()
 
-        employer_col = _get_employer_column(period_df)
-        company_df = _filter_company_rows(period_df, employer_col, company_name)
-        if company_df.empty:
+        stats = _company_stats_for_loaded_period(company_name, period_label)
+        if stats is None:
             return {
                 "message": f"No sponsorship data found for {company_name} in {period_label}.",
                 "searched_periods": [period_label],
@@ -1145,22 +1202,33 @@ def get_company_stats(
                 "latest_sponsorship_period": None,
             }
 
-        stats = _build_company_stats(
-            company_df.copy(),
-            employer_col,
-            period_label=period_label,
-            source_url=data_manager.source_url,
-        )
         stats["searched_periods"] = [period_label]
         stats["latest_sponsorship_period"] = period_label
         return stats
     finally:
-        data_manager.df = original_df
-        data_manager.last_loaded = original_last_loaded
-        data_manager.current_file = original_current_file
-        data_manager.loaded_year = original_loaded_year
-        data_manager.loaded_quarter = original_loaded_quarter
-        data_manager.source_url = original_source_url
+        if original_period != (
+            data_manager.loaded_year,
+            data_manager.loaded_quarter,
+        ):
+            data_manager.load_data(*original_period)
+
+
+def _company_stats_for_loaded_period(
+    company_name: str,
+    period_label: str,
+) -> Dict | None:
+    """Build compact stats without leaking a reference to the full frame."""
+    period_df = data_manager.get_loaded_data()
+    employer_col = _get_employer_column(period_df)
+    company_df = _filter_company_rows(period_df, employer_col, company_name)
+    if company_df.empty:
+        return None
+    return _build_company_stats(
+        company_df,
+        employer_col,
+        period_label=period_label,
+        source_url=data_manager.source_url,
+    )
 
 
 @mcp.tool(
@@ -1169,43 +1237,40 @@ def get_company_stats(
         "six-quarter window. Use this compact series to plot sponsorship volume."
     )
 )
+@serialized_data_access
 def get_company_sponsorship_trend(company_name: str) -> dict:
     """Return newest-first quarterly filing figures for charting."""
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
 
-    original_df = data_manager.df
-    original_last_loaded = data_manager.last_loaded
-    original_current_file = data_manager.current_file
-    original_loaded_year = data_manager.loaded_year
-    original_loaded_quarter = data_manager.loaded_quarter
-    original_source_url = data_manager.source_url
+    original_period = (
+        cast(int, data_manager.loaded_year),
+        cast(int, data_manager.loaded_quarter),
+    )
     periods: list[dict] = []
     missing_periods: list[str] = []
 
+    latest_period = data_manager.latest_known_period()
+    if latest_period is None:
+        return {
+            "company": company_name,
+            "periods": [],
+            "missing_periods": [],
+            "period_count": 0,
+            "window_years": HISTORICAL_CACHE_YEARS,
+        }
     try:
-        latest_period = data_manager.latest_known_period()
-        if latest_period is None:
-            return {
-                "company": company_name,
-                "periods": [],
-                "missing_periods": [],
-                "period_count": 0,
-                "window_years": HISTORICAL_CACHE_YEARS,
-            }
         for year, quarter in data_manager.periods_ending_at(*latest_period):
             period_label = f"FY{year} Q{quarter}"
-            if (year, quarter) == (original_loaded_year, original_loaded_quarter):
-                period_df = data_manager.get_loaded_data()
-            elif not data_manager.load_data(year, quarter):
+            if (year, quarter) != (
+                data_manager.loaded_year,
+                data_manager.loaded_quarter,
+            ) and not data_manager.load_data(year, quarter):
                 missing_periods.append(period_label)
                 continue
-            else:
-                period_df = data_manager.get_loaded_data()
 
-            employer_col = _get_employer_column(period_df)
-            company_df = _filter_company_rows(period_df, employer_col, company_name)
-            if company_df.empty:
+            stats = _company_stats_for_loaded_period(company_name, period_label)
+            if stats is None:
                 periods.append(
                     {
                         "period": period_label,
@@ -1217,12 +1282,6 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
                 )
                 continue
 
-            stats = _build_company_stats(
-                company_df.copy(),
-                employer_col,
-                period_label=period_label,
-                source_url=data_manager.source_url,
-            )
             periods.append(
                 {
                     "period": period_label,
@@ -1233,12 +1292,11 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
                 }
             )
     finally:
-        data_manager.df = original_df
-        data_manager.last_loaded = original_last_loaded
-        data_manager.current_file = original_current_file
-        data_manager.loaded_year = original_loaded_year
-        data_manager.loaded_quarter = original_loaded_quarter
-        data_manager.source_url = original_source_url
+        if original_period != (
+            data_manager.loaded_year,
+            data_manager.loaded_quarter,
+        ):
+            data_manager.load_data(*original_period)
 
     return {
         "company": company_name,
@@ -1249,6 +1307,7 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
     }
 
 @mcp.tool(description="Export filtered H-1B data to CSV file")
+@serialized_data_access
 def export_results(
     job_role: str,
     city: Optional[str] = None,
@@ -1296,6 +1355,7 @@ def export_results(
     }
 
 @mcp.tool(description="List top H-1B sponsoring companies by volume")
+@serialized_data_access
 def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     """
     Get top H-1B sponsoring companies by application volume.
@@ -1307,10 +1367,10 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     Returns:
         List of top sponsoring companies with statistics
     """
-    if not data_manager.is_loaded():
+    if not data_manager.ensure_latest_loaded():
         return {"error": "Data not loaded. Please run load_h1b_data first."}
     
-    df = data_manager.get_loaded_data().copy()
+    df = data_manager.get_loaded_data()
     
     employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
     
@@ -1332,7 +1392,6 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
         for col in ['WAGE_RATE_OF_PAY_FROM', 'PREVAILING_WAGE', 'WAGE_RATE_OF_PAY']:
             if col in df.columns:
                 wage_col = col
-                company_df[wage_col] = pd.to_numeric(company_df[wage_col], errors='coerce')
                 break
         
         result = {
@@ -1342,7 +1401,10 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
         }
         
         if wage_col:
-            result["avg_wage"] = company_df[wage_col].mean()
+            result["avg_wage"] = pd.to_numeric(
+                company_df[wage_col],
+                errors='coerce',
+            ).mean()
         
         if 'WORKSITE_STATE' in company_df.columns:
             result["primary_state"] = company_df['WORKSITE_STATE'].mode()[0] if len(company_df['WORKSITE_STATE'].mode()) > 0 else "N/A"
@@ -1355,6 +1417,7 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     }
 
 @mcp.tool(description="Talk to the H-1B search in simple words - I'll figure out what you want")
+@serialized_data_access
 def ask(prompt: str) -> Dict:
     """Natural language interface for H-1B job search.
     
@@ -1701,6 +1764,7 @@ def ask(prompt: str) -> Dict:
     }
 
 @mcp.tool(description="Get available LCA data years and quarters")
+@serialized_data_access
 def get_available_data() -> Dict:
     """
     List available LCA data periods and cached files.

@@ -377,6 +377,60 @@ class H1BServerTests(unittest.TestCase):
             "cache instead of racing it on the shared temp file",
         )
 
+    def test_concurrent_cached_loads_share_one_resident_frame(self) -> None:
+        self.cache_disclosure(2026, 1)
+        manager = server.H1BDataManager()
+        real_read_pickle = server.pd.read_pickle
+        read_started = threading.Event()
+        release_read = threading.Event()
+        read_calls: list[Path] = []
+
+        def read_pickle_once(path):
+            read_calls.append(Path(path))
+            read_started.set()
+            self.assertTrue(release_read.wait(timeout=5))
+            return real_read_pickle(path)
+
+        results: list[bool] = []
+
+        def worker() -> None:
+            results.append(manager.load_data(2026, 1))
+
+        with patch.object(server.pd, "read_pickle", side_effect=read_pickle_once):
+            first = threading.Thread(target=worker)
+            first.start()
+            self.assertTrue(read_started.wait(timeout=5))
+
+            second = threading.Thread(target=worker)
+            second.start()
+            time.sleep(0.1)
+            release_read.set()
+
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        self.assertEqual(results, [True, True])
+        self.assertEqual(len(read_calls), 1)
+        self.assertTrue(manager.is_loaded())
+
+    def test_period_switch_releases_old_frame_before_deserializing(self) -> None:
+        self.cache_disclosure(2026, 1)
+        manager = server.H1BDataManager()
+        manager.df = disclosure_rows()
+        manager.loaded_year = 2025
+        manager.loaded_quarter = 4
+        replacement = disclosure_rows().assign(EMPLOYER_NAME="Replacement")
+
+        def read_after_release(_path):
+            self.assertIsNone(manager.df)
+            return replacement
+
+        with patch.object(server.pd, "read_pickle", side_effect=read_after_release):
+            self.assertTrue(manager.load_data(2026, 1))
+
+        self.assertIs(manager.df, replacement)
+        self.assertEqual(manager.period_label(), "FY2026 Q1")
+
     def test_latest_load_uses_newest_cache_when_dol_is_unavailable(self) -> None:
         self.cache_default_disclosure()
         self.cache_disclosure(2025, 4)
