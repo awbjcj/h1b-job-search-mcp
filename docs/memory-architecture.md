@@ -47,15 +47,24 @@ These settings bound dataset caching, not the entire Python process or all
 SQLite allocations. There is one serving process; operations are serialized
 around period selection. No extra database service or always-on worker is added.
 
-`file_cache.py` also releases clean operating-system file pages after each
-SQLite connection closes, including error paths. Imports release the committed
-database and the source file after their readers/writers close. On Linux this
+`file_cache.py` retains clean operating-system file pages while a quarterly
+database is in use, then releases them after **30 minutes without access**.
+Each file has an independent monotonic idle timer, reset when a query finishes
+(including error paths). Active readers prevent eviction. A background task
+checks every 30 seconds even when no requests arrive, so normal cleanup occurs
+30–30.5 minutes after the last reader finishes. Reader registration and eviction
+share a lock to prevent a query from starting during cache release. The task
+starts and stops with the server lifespan. Health checks do not reset the timer.
+
+Imports release the committed database and the source file immediately after
+their readers/writers close; subsequent queries follow the idle policy. On Linux this
 uses `POSIX_FADV_DONTNEED` on only the relevant file; it does not delete data,
 require root, or clear global caches. Unsupported platforms skip it, and OS
 errors are logged without failing the operation. See the
 [Linux file-advice documentation](https://man7.org/linux/man-pages/man2/posix_fadvise.2.html).
 
-This trades repeat-read disk I/O for lower retained RAM. SQLite and the kernel
+This preserves warm-cache performance during active sessions and lowers idle
+RAM afterward. Frequent requests can keep a file cached indefinitely. SQLite and the kernel
 can still allocate temporary memory during a query. The advice is best-effort,
 not a hard memory ceiling; this is not a promise of 75 MB peak usage.
 
@@ -120,12 +129,14 @@ baseline `--server-dir`; do not check out over local edits.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-The 52-test suite covers API behavior, all-row aggregates, numeric/null wages,
+The 56-test suite covers API behavior, all-row aggregates, numeric/null wages,
 odd/even medians, real XLSX streaming, migration in a real subprocess, fresh-process
 reads without pandas/openpyxl, interrupted imports, concurrent reads, query cache
 settings, result bounds, and container privilege-drop ordering. Python static
 error checks pass. Cache-release tests also verify committed data, descriptor
 cleanup, unsupported platforms and preservation of query/import failures.
+Idle-expiry tests use an injected clock to cover the exact 1,800-second boundary,
+timer resets, independent files, overlapping readers and cleanup without traffic.
 A local Linux Docker build was not run because the Docker daemon
 was unavailable.
 
@@ -143,7 +154,11 @@ A targeted advisory release reduced file cache from 667 MB to 0.6 MB without
 a restart or any data changes. A baseline of real MCP company lookups, search,
 top sponsors and a six-quarter trend then accumulated 828 MB of file cache
 and 917 MB total (including the short-lived measurement process). This is why
-automatic file-cache release is needed after each operation, not just import.
+automatic file-cache release is needed after an idle interval, not just import.
+
+The measurements below describe the earlier **immediate-release policy**.
+The current 30-minute idle policy intentionally retains file pages during
+active use; do not expect its 74–97 MB post-query readings until idle eviction.
 
 The cache-release fix `4f2ac11` passed all 52 local tests and reached Railway
 `SUCCESS` in deployment `d0f50332-4231-443c-a51a-5525ed66db51`. Two production

@@ -8,7 +8,7 @@ import sys
 import threading
 import zipfile
 from collections.abc import Sequence
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime
 from functools import wraps
 from html import unescape
@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse
 
 from disclosure_store import DisclosureStore
 from employers import _normalise_employer as _normalise_employer
+from file_cache import query_file_cache
 
 DATA_CACHE_DIR = os.environ.get(
     "H1B_DATA_CACHE_DIR", os.path.join(os.path.dirname(__file__), "..", "data_cache")
@@ -683,10 +684,14 @@ async def server_lifespan(_server):
     # (reporting "degraded" until the warmup finishes) instead of the whole
     # server being unreachable during warmup.
     warmup_task = asyncio.create_task(_warm_up_data_cache())
+    cache_cleanup_task = asyncio.create_task(query_file_cache.run())
     try:
         yield {"data_manager": data_manager}
     finally:
         warmup_task.cancel()
+        cache_cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cache_cleanup_task
 
 
 mcp = FastMCP("H1B Job Search MCP Server", lifespan=server_lifespan)

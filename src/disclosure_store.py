@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from employers import _normalise_employer
-from file_cache import release_file_cache
+from file_cache import query_file_cache
 
 SCHEMA_VERSION = 1
 MAX_RESULTS = 1000
@@ -70,6 +70,12 @@ class DisclosureStore:
 
     @contextmanager
     def connect(self):
+        with query_file_cache.use(self.path):
+            with self._connect() as db:
+                yield db
+
+    @contextmanager
+    def _connect(self):
         db = sqlite3.connect(Path(self.path).resolve().as_uri() + "?mode=ro", uri=True)
         try:
             configure(db)
@@ -93,7 +99,6 @@ class DisclosureStore:
             yield db
         finally:
             db.close()
-            release_file_cache(self.path)
 
     def _stats(self, db, where, args, period_label, source_url):
         employer = quote(self.employer)
