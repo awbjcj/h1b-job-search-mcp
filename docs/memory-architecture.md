@@ -120,11 +120,13 @@ baseline `--server-dir`; do not check out over local edits.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-The 47-test suite covers API behavior, all-row aggregates, numeric/null wages,
+The 52-test suite covers API behavior, all-row aggregates, numeric/null wages,
 odd/even medians, real XLSX streaming, migration in a real subprocess, fresh-process
 reads without pandas/openpyxl, interrupted imports, concurrent reads, query cache
 settings, result bounds, and container privilege-drop ordering. Python static
-checks pass. A local Linux Docker build was not run because the Docker daemon
+error checks pass. Cache-release tests also verify committed data, descriptor
+cleanup, unsupported platforms and preservation of query/import failures.
+A local Linux Docker build was not run because the Docker daemon
 was unavailable.
 
 ## Production evidence and verification
@@ -142,6 +144,30 @@ a restart or any data changes. A baseline of real MCP company lookups, search,
 top sponsors and a six-quarter trend then accumulated 828 MB of file cache
 and 917 MB total (including the short-lived measurement process). This is why
 automatic file-cache release is needed after each operation, not just import.
+
+The cache-release fix `4f2ac11` passed all 52 local tests and reached Railway
+`SUCCESS` in deployment `d0f50332-4231-443c-a51a-5525ed66db51`. Two production
+rounds (10 calls) returned matching response fingerprints for Google/Microsoft
+statistics, California software-engineer search, top sponsors and Google's
+six-quarter trend. After the probe exited, container memory was 97.3 MB, with
+68.5 MB anonymous memory and 24.4 MB filesystem cache. The two-round probe
+finished at 112.3 MB including its own memory, with no second-round growth.
+These are short-run observations, not billing guarantees.
+
+| Operation | Baseline latency (seconds) | Cache-release latency, two rounds (seconds) |
+| --- | ---: | ---: |
+| Google company stats | 5.480 | 5.350 / 4.621 |
+| Microsoft company stats | 1.214 | 6.590 / 6.594 |
+| Filtered search, 10 results | 2.287 | 6.599 / 6.596 |
+| Top 10 sponsors | 2.288 | 15.565 / 15.406 |
+| Google six-quarter trend | 7.123 | 11.482 / 10.322 |
+
+Baseline calls share the cache warmed by preceding calls; the new policy
+releases each operation's pages. The largest sampled transient allocation was
+577.2 MB including the probe, compared with 926.1 MB in the baseline. The active
+query peak is materially higher than idle memory. The existing volume usage
+remained about 2.0 GiB (44% of its filesystem capacity), with rollback pickles
+preserved. No cache-release errors were recorded during these calls.
 
 Use `scripts/profile_container_memory.py` **inside the running container**
 after deployment to test the actual MCP HTTP endpoint. It runs two rounds of
