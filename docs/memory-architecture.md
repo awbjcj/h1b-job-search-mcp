@@ -47,6 +47,18 @@ These settings bound dataset caching, not the entire Python process or all
 SQLite allocations. There is one serving process; operations are serialized
 around period selection. No extra database service or always-on worker is added.
 
+`file_cache.py` also releases clean operating-system file pages after each
+SQLite connection closes, including error paths. Imports release the committed
+database and the source file after their readers/writers close. On Linux this
+uses `POSIX_FADV_DONTNEED` on only the relevant file; it does not delete data,
+require root, or clear global caches. Unsupported platforms skip it, and OS
+errors are logged without failing the operation. See the
+[Linux file-advice documentation](https://man7.org/linux/man-pages/man2/posix_fadvise.2.html).
+
+This trades repeat-read disk I/O for lower retained RAM. SQLite and the kernel
+can still allocate temporary memory during a query. The advice is best-effort,
+not a hard memory ceiling; this is not a promise of 75 MB peak usage.
+
 `H1B_DATA_CACHE_DIR` optionally overrides the cache directory. The existing
 Railway mount works without adding another volume or increasing its capacity.
 The container sets `MALLOC_ARENA_MAX=2` to limit glibc arena retention.
@@ -115,17 +127,34 @@ settings, result bounds, and container privilege-drop ordering. Python static
 checks pass. A local Linux Docker build was not run because the Docker daemon
 was unavailable.
 
-## Production rollout status and verification
+## Production evidence and verification
 
-The refactor is local on `codex/volume-backed-h1b`; it is not committed, pushed
-or deployed. The running H-1B revision remains `2d5db2d`, deployment
-`428a9d65-3a39-4131-aa32-9f29e17afb5b`. No production cost reduction has been
-verified yet.
+The SQLite refactor reached `main` at `863a901`, deployed successfully as
+`abb6429f-9e27-437c-ac64-40c39f9badc6`, and converted all six production caches.
+The initial 73–85 MB Railway readings were fresh-start readings, not evidence
+of memory after real traffic. Later inspection reproduced 741 MB of container
+memory: approximately 667 MB file cache, 69 MB anonymous memory, and 5 MB kernel
+memory. The app process RSS was about 91 MB. SQLite's 8 MiB cache setting does
+not constrain the kernel cache that Railway reports.
 
-After production deployment is authorized, deploy only this H-1B service from
-the reviewed revision. Preserve its current volume, domains, replica count and
-memory ceiling. Wait for Railway `SUCCESS`, then verify `/health`, all six
-indexed quarters, company lookup, search, trends, free disk and logs. Compare
-idle and query RAM after the importer exits, then collect a longer usage window
-before claiming monthly savings. A code rollback can reuse retained legacy
-pickles; do not delete the volume or existing datasets.
+A targeted advisory release reduced file cache from 667 MB to 0.6 MB without
+a restart or any data changes. A baseline of real MCP company lookups, search,
+top sponsors and a six-quarter trend then accumulated 828 MB of file cache
+and 917 MB total (including the short-lived measurement process). This is why
+automatic file-cache release is needed after each operation, not just import.
+
+Use `scripts/profile_container_memory.py` **inside the running container**
+after deployment to test the actual MCP HTTP endpoint. It runs two rounds of
+those operations, records cgroup total/anonymous/file bytes, samples transient
+memory, and prints SHA-256 response fingerprints without exposing job records.
+The probe uses only the Python standard library. Compare fingerprints across
+revisions and measure query latency as well as retained memory; its container
+readings include the probe itself. After it exits, also read Railway metrics.
+Do not treat a fresh-process RSS benchmark or a fresh-start metric as the
+long-term container footprint.
+
+Deploy only the H-1B service from the reviewed revision. Preserve its volume,
+domains, replica count and memory ceiling. Wait for Railway `SUCCESS`, verify
+`/health`, all six indexed quarters, queries, free disk and logs, then collect
+a longer usage window before claiming monthly savings. A code rollback can
+reuse retained legacy pickles; do not delete the volume or existing datasets.

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from disclosure_store import SCHEMA_VERSION, WAGE_COLUMNS, configure, numeric, quote
 from employers import _normalise_employer
+from file_cache import release_file_cache
 
 BATCH_SIZE = 1000
 
@@ -89,6 +90,7 @@ def write_database(destination, columns, rows):
                 raise ValueError("Disclosure cache failed integrity check")
         finally:
             db.close()
+            release_file_cache(temporary)
         os.replace(temporary, destination)
         return count
     finally:
@@ -97,6 +99,13 @@ def write_database(destination, columns, rows):
 
 
 def convert(source, destination):
+    try:
+        return _convert(source, destination)
+    finally:
+        release_file_cache(source)
+
+
+def _convert(source, destination):
     source = Path(source)
     if source.suffix == ".pkl":
         # Only locally generated, trusted legacy caches are accepted here.
