@@ -4,7 +4,7 @@ import threading
 import time
 import unittest
 import warnings
-import zipfile
+import uuid
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -16,12 +16,14 @@ warnings.filterwarnings(
     message="Using `httpx` with `starlette.testclient` is deprecated.*",
 )
 
-from starlette.testclient import TestClient
+from starlette.testclient import TestClient  # noqa: E402
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import server  # noqa: E402
+from disclosure_store import DisclosureStore  # noqa: E402
+from import_disclosure import convert, write_database  # noqa: E402
 
 
 def disclosure_rows(*, case_status: str = "Certified") -> pd.DataFrame:
@@ -40,11 +42,16 @@ def disclosure_rows(*, case_status: str = "Certified") -> pd.DataFrame:
 
 
 def xlsx_payload() -> bytes:
-    """Return a minimal ZIP payload so download tests pass XLSX validation."""
+    """Use a real workbook so the streaming importer is exercised."""
     payload = BytesIO()
-    with zipfile.ZipFile(payload, "w") as archive:
-        archive.writestr("[Content_Types].xml", b"x" * 2_000)
+    disclosure_rows().to_excel(payload, index=False)
     return payload.getvalue()
+
+
+def disk_store(frame):
+    path = Path(server.DATA_CACHE_DIR) / f"fixture-{uuid.uuid4().hex}.sqlite"
+    write_database(path, frame.columns, frame.itertuples(index=False, name=None))
+    return DisclosureStore(str(path))
 
 
 class H1BServerTests(unittest.TestCase):
@@ -62,6 +69,8 @@ class H1BServerTests(unittest.TestCase):
         # the first match), so any period a test doesn't explicitly cache
         # must fail fast instead of making a real network call.
         self._no_network_patchers = [
+            patch.object(server.H1BDataManager, "_convert_cache",
+                         side_effect=lambda source, target: convert(source, target)),
             patch.object(
                 server.requests,
                 "get",
@@ -88,9 +97,9 @@ class H1BServerTests(unittest.TestCase):
         self.cache_period(2024, 4, disclosure)
 
     def cache_period(self, year: int, quarter: int, data: pd.DataFrame) -> None:
-        data.to_pickle(
-            Path(self._temp_dir.name) / f"LCA_{year}Q{quarter}.pkl"
-        )
+        write_database(Path(self._temp_dir.name) / f"LCA_{year}Q{quarter}.sqlite",
+                       data.columns, data.itertuples(index=False, name=None))
+
 
     def cache_disclosure(self, year: int, quarter: int) -> None:
         self.cache_period(year, quarter, disclosure_rows())
@@ -181,7 +190,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertIn("outside the cached six-quarter window", result["error"])
 
     def test_recent_periods_cover_six_fiscal_quarters(self) -> None:
-        server.data_manager.df = disclosure_rows()
+        server.data_manager.store = disk_store(disclosure_rows())
         server.data_manager.loaded_year = 2026
         server.data_manager.loaded_quarter = 2
 
@@ -197,7 +206,7 @@ class H1BServerTests(unittest.TestCase):
         manager = server.H1BDataManager()
 
         def load_latest(*, force_download=False):
-            manager.df = disclosure_rows()
+            manager.store = disk_store(disclosure_rows())
             manager.loaded_year = 2026
             manager.loaded_quarter = 2
             return True
@@ -206,7 +215,7 @@ class H1BServerTests(unittest.TestCase):
 
         def load_period(year, quarter, force_download=False):
             loaded.append((year, quarter))
-            manager.df = disclosure_rows()
+            manager.store = disk_store(disclosure_rows())
             manager.loaded_year = year
             manager.loaded_quarter = quarter
             return True
@@ -249,7 +258,7 @@ class H1BServerTests(unittest.TestCase):
                 (2026, 1), (2026, 2), (2026, 3),
             ],
         )
-        self.assertFalse((Path(self._temp_dir.name) / "LCA_2025Q1.pkl").exists())
+        self.assertFalse((Path(self._temp_dir.name) / "LCA_2025Q1.sqlite").exists())
         self.assertFalse(stale_excel.exists())
 
     def test_company_sponsorship_trend_returns_all_cached_quarters(self) -> None:
@@ -301,16 +310,12 @@ class H1BServerTests(unittest.TestCase):
             manager,
             "get_dol_urls",
             return_value=["https://example.test/LCA_2026Q1.xlsx"],
-        ), patch.object(server.requests, "get", return_value=response), patch.object(
-            server.pd,
-            "read_excel",
-            return_value=disclosure_rows(),
-        ) as read_excel:
+        ), patch.object(server.requests, "get", return_value=response):
             loaded = manager.load_data(2026, 1)
 
         self.assertTrue(loaded)
-        self.assertNotIn("nrows", read_excel.call_args.kwargs)
-        self.assertTrue((Path(self._temp_dir.name) / "LCA_2026Q1.pkl").exists())
+        self.assertEqual(len(manager.get_loaded_data()), 1)
+        self.assertTrue((Path(self._temp_dir.name) / "LCA_2026Q1.sqlite").exists())
 
     def test_concurrent_load_data_for_same_period_does_not_race(self) -> None:
         """Two threads loading the same not-yet-cached period must not both
@@ -344,11 +349,7 @@ class H1BServerTests(unittest.TestCase):
             manager,
             "get_dol_urls",
             return_value=["https://example.test/LCA_2026Q1.xlsx"],
-        ), patch.object(server.requests, "get", side_effect=fake_get), patch.object(
-            server.pd,
-            "read_excel",
-            return_value=disclosure_rows(),
-        ):
+        ), patch.object(server.requests, "get", side_effect=fake_get):
             results: list[bool] = []
 
             def worker() -> None:
@@ -377,59 +378,52 @@ class H1BServerTests(unittest.TestCase):
             "cache instead of racing it on the shared temp file",
         )
 
-    def test_concurrent_cached_loads_share_one_resident_frame(self) -> None:
+    def test_concurrent_cached_loads_reuse_store_without_deserialization(self):
         self.cache_disclosure(2026, 1)
         manager = server.H1BDataManager()
-        real_read_pickle = server.pd.read_pickle
-        read_started = threading.Event()
-        release_read = threading.Event()
-        read_calls: list[Path] = []
+        results = []
+        with patch.object(pd, 'read_pickle', side_effect=AssertionError('Must query disk')):
+            threads = [threading.Thread(target=lambda: results.append(manager.load_data(2026, 1)))
+                       for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+        self.assertEqual(results, [True] * 4)
+        self.assertFalse(hasattr(manager, 'df'))
+        self.assertEqual(len(manager.get_loaded_data()), 1)
 
-        def read_pickle_once(path):
-            read_calls.append(Path(path))
-            read_started.set()
-            self.assertTrue(release_read.wait(timeout=5))
-            return real_read_pickle(path)
+    def test_period_switch_keeps_only_store_metadata(self):
+        self.cache_disclosure(2026, 1)
+        self.cache_disclosure(2025, 4)
+        manager = server.H1BDataManager()
+        self.assertTrue(manager.load_data(2025, 4))
+        self.assertTrue(manager.load_data(2026, 1))
+        self.assertFalse(hasattr(manager, 'df'))
+        self.assertEqual(manager.period_label(), 'FY2026 Q1')
+        self.assertEqual(manager.store.row_count, 1)
 
-        results: list[bool] = []
-
-        def worker() -> None:
-            results.append(manager.load_data(2026, 1))
-
-        with patch.object(server.pd, "read_pickle", side_effect=read_pickle_once):
-            first = threading.Thread(target=worker)
-            first.start()
-            self.assertTrue(read_started.wait(timeout=5))
-
-            second = threading.Thread(target=worker)
-            second.start()
-            time.sleep(0.1)
-            release_read.set()
-
-            first.join(timeout=5)
-            second.join(timeout=5)
-
-        self.assertEqual(results, [True, True])
-        self.assertEqual(len(read_calls), 1)
-        self.assertTrue(manager.is_loaded())
-
-    def test_period_switch_releases_old_frame_before_deserializing(self) -> None:
+    def test_failed_period_load_preserves_current_store(self):
         self.cache_disclosure(2026, 1)
         manager = server.H1BDataManager()
-        manager.df = disclosure_rows()
-        manager.loaded_year = 2025
-        manager.loaded_quarter = 4
-        replacement = disclosure_rows().assign(EMPLOYER_NAME="Replacement")
+        self.assertTrue(manager.load_data(2026, 1))
+        original = manager.store
+        with patch.object(manager, 'get_dol_urls', return_value=['https://example.test/unavailable']):
+            self.assertFalse(manager.load_data(2026, 2))
+        self.assertIs(manager.store, original)
+        self.assertEqual(manager.period_label(), 'FY2026 Q1')
+        self.assertEqual(manager.store.company_stats('Google', None, None)['total_applications'], 1)
 
-        def read_after_release(_path):
-            self.assertIsNone(manager.df)
-            return replacement
-
-        with patch.object(server.pd, "read_pickle", side_effect=read_after_release):
-            self.assertTrue(manager.load_data(2026, 1))
-
-        self.assertIs(manager.df, replacement)
-        self.assertEqual(manager.period_label(), "FY2026 Q1")
+    def test_failed_legacy_migration_preserves_pickle_without_redownload(self):
+        disclosure_rows().to_pickle(Path(self._temp_dir.name) / 'LCA_2026Q1.pkl')
+        manager = server.H1BDataManager()
+        with patch.object(manager, '_convert_cache', side_effect=RuntimeError('disk full')), patch.object(
+            server.requests, 'get', side_effect=AssertionError('Must not redownload')
+        ) as get:
+            self.assertFalse(manager.load_data(2026, 1))
+        get.assert_not_called()
+        self.assertTrue((Path(self._temp_dir.name) / 'LCA_2026Q1.pkl').exists())
+        self.assertFalse(manager.is_loaded())
 
     def test_latest_load_uses_newest_cache_when_dol_is_unavailable(self) -> None:
         self.cache_default_disclosure()
@@ -472,7 +466,7 @@ class H1BServerTests(unittest.TestCase):
         def fake_load_data(self, year=None, quarter=None, force_download=False):
             attempted_periods.append((year, quarter))
             if (year, quarter) == (2025, 4):
-                self.df = disclosure_rows()
+                self.store = disk_store(disclosure_rows())
                 self.loaded_year, self.loaded_quarter = year, quarter
                 self.source_url = "https://example.test/fake"
                 return True
@@ -497,7 +491,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(result["result"]["data_version"], "FY2025 Q4")
 
     def test_search_applies_full_company_stats_to_each_matching_position(self) -> None:
-        server.data_manager.df = pd.DataFrame(
+        server.data_manager.store = disk_store(pd.DataFrame(
             [
                 {
                     "CASE_STATUS": "Certified",
@@ -524,7 +518,7 @@ class H1BServerTests(unittest.TestCase):
                     "WAGE_RATE_OF_PAY_FROM": 160_000,
                 },
             ]
-        )
+        ))
 
         result = server.search_h1b_jobs(
             "Engineer",
@@ -542,7 +536,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(stats[0]["top_job_titles"]["Product Manager"], 1)
 
     def test_manual_and_automatic_company_checks_share_company_stats(self) -> None:
-        server.data_manager.df = pd.DataFrame(
+        server.data_manager.store = disk_store(pd.DataFrame(
             [
                 {
                     "CASE_STATUS": "Certified",
@@ -557,7 +551,7 @@ class H1BServerTests(unittest.TestCase):
                     "WAGE_RATE_OF_PAY_FROM": 190_000,
                 },
             ]
-        )
+        ))
 
         manual = server.get_company_stats("Google")
         automatic = server.ask("Tell me about Google's H-1B statistics")
@@ -611,8 +605,8 @@ class H1BServerTests(unittest.TestCase):
             "get_dol_urls",
             return_value=["https://example.test/LCA_2026Q3.xlsx"],
         ), patch.object(server.requests, "get", return_value=response), patch.object(
-            server.pd,
-            "read_excel",
+            server.H1BDataManager,
+            "_convert_cache",
         ) as read_excel:
             loaded = manager.load_data(2026, 3)
 
@@ -634,14 +628,14 @@ class H1BServerTests(unittest.TestCase):
         )
 
     def test_company_stats_counts_modern_title_case_certified_status(self) -> None:
-        server.data_manager.df = disclosure_rows(case_status="Certified")
+        server.data_manager.store = disk_store(disclosure_rows(case_status="Certified"))
 
         result = server.get_company_stats("Google")
 
         self.assertEqual(result["certified"], 1)
 
     def test_job_search_accepts_modern_title_case_certified_status(self) -> None:
-        server.data_manager.df = disclosure_rows(case_status="Certified")
+        server.data_manager.store = disk_store(disclosure_rows(case_status="Certified"))
 
         result = server.search_h1b_jobs("Software Engineer", max_results=1)
 

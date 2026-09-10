@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
 import asyncio
-import gc
+import csv
 import os
 import re
 import subprocess
+import sys
 import threading
-import unicodedata
 import zipfile
 from collections.abc import Sequence
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from functools import wraps
 from html import unescape
-from typing import Any, Dict, Optional, cast
+from typing import Dict, Optional, cast
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
-import pandas as pd
 import requests
 from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "data_cache")
+from disclosure_store import DisclosureStore
+from employers import _normalise_employer as _normalise_employer
+
+DATA_CACHE_DIR = os.environ.get(
+    "H1B_DATA_CACHE_DIR", os.path.join(os.path.dirname(__file__), "..", "data_cache")
+)
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+# SQLite sorting uses the volume too, including inside the importer subprocess.
+os.environ.setdefault("SQLITE_TMPDIR", os.path.join(DATA_CACHE_DIR, "tmp"))
+os.makedirs(os.environ["SQLITE_TMPDIR"], exist_ok=True)
 DOL_PERFORMANCE_URL = "https://www.dol.gov/agencies/eta/foreign-labor/performance"
 DOL_REQUEST_HEADERS = {
     "User-Agent": "h1b-job-search-mcp/1.0 (+https://www.dol.gov/)",
@@ -38,68 +45,16 @@ LCA_DISCLOSURE_LINK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CACHE_ARTIFACT_PATTERN = re.compile(
-    r"LCA_(\d{4})Q([1-4])\.(pkl|xlsx)",
+    r"LCA_(\d{4})Q([1-4])\.(pkl|xlsx|sqlite)",
     re.IGNORECASE,
 )
 LATEST_DISCOVERY_LOOKBACK_YEARS = 5
 RECENT_SPONSORSHIP_QUARTERS = 6
 HISTORICAL_CACHE_YEARS = RECENT_SPONSORSHIP_QUARTERS / 4
 
-# These forms occur frequently in the FY2026 Q1 employer data. Canonicalizing
-# dotted abbreviations before removing legal suffixes keeps names such as
-# "Woven by Toyota, U.S., Inc." and "WOVEN BY TOYOTA US INC" equivalent.
-_EMPLOYER_ABBREVIATIONS = (
-    (("p", "l", "l", "c"), "pllc"),
-    (("g", "m", "b", "h"), "gmbh"),
-    (("l", "l", "c"), "llc"),
-    (("l", "l", "p"), "llp"),
-    (("p", "l", "c"), "plc"),
-    (("u", "s", "a"), "usa"),
-    (("u", "s"), "us"),
-    (("n", "a"), "na"),
-    (("p", "c"), "pc"),
-    (("p", "a"), "pa"),
-    (("l", "p"), "lp"),
-    (("s", "a"), "sa"),
-    (("a", "g"), "ag"),
-    (("b", "v"), "bv"),
-    (("n", "v"), "nv"),
-)
-_EMPLOYER_LEGAL_SUFFIX_PHRASES = (
-    ("limited", "liability", "company"),
-    ("public", "benefit", "corporation"),
-    ("professional", "corporation"),
-)
-_EMPLOYER_LEGAL_SUFFIXES = frozenset(
-    {
-        "inc",
-        "incorporated",
-        "llc",
-        "llp",
-        "lp",
-        "pllc",
-        "plc",
-        "corp",
-        "corporation",
-        "co",
-        "company",
-        "ltd",
-        "limited",
-        "pc",
-        "pa",
-        "pbc",
-        "na",
-        "sa",
-        "ag",
-        "bv",
-        "nv",
-        "gmbh",
-    }
-)
-
 class H1BDataManager:
     def __init__(self):
-        self.df: pd.DataFrame | None = None
+        self.store: DisclosureStore | None = None
         self.last_loaded = None
         self.current_file = None
         self.loaded_year = None
@@ -110,10 +65,7 @@ class H1BDataManager:
         self.latest_checked = None
         self.discovered_periods: list[tuple[int, int]] = []
         self.discovered_urls: dict[tuple[int, int], list[str]] = {}
-        # FastMCP runs synchronous tools in worker threads while startup uses
-        # asyncio.to_thread. Keep one process-wide owner for the single
-        # in-memory disclosure DataFrame. Re-entrancy permits tool composition
-        # such as export_results -> search_h1b_jobs.
+        # Serialize period selection, import, and tool queries across workers.
         self._data_lock = threading.RLock()
         # The background startup warmup (asyncio.to_thread) and any MCP tool
         # call run on separate threads and share this instance. Without a
@@ -134,22 +86,25 @@ class H1BDataManager:
 
     @contextmanager
     def operation(self):
-        """Serialize access to the single mutable in-memory DataFrame."""
+        """Serialize access to the selected disk-backed disclosure."""
         with self._data_lock:
             yield
 
-    def _discard_loaded_data(self) -> None:
-        """Release the current frame before loading another full quarter."""
-        self.df = None
-        self.last_loaded = None
-        self.current_file = None
-        self.loaded_year = None
-        self.loaded_quarter = None
-        self.source_url = None
-        # Each disclosure frame can occupy multiple GB. Reclaim cyclic
-        # garbage before pandas allocates its replacement so period switches
-        # do not briefly retain two full quarters.
-        gc.collect()
+    def _activate_store(self, path, year, quarter, source_url):
+        store = DisclosureStore(path)
+        self.store = store
+        self.current_file = path
+        self.last_loaded = datetime.now()
+        self.loaded_year = year
+        self.loaded_quarter = quarter
+        self.source_url = source_url
+
+    def _convert_cache(self, source, destination):
+        # Keep import-only libraries and transient allocations out of the server.
+        subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), 'import_disclosure.py'),
+             source, destination], check=True, timeout=1800,
+        )
 
     def get_dol_urls(self, year: int, quarter: int) -> list:
         """Generate DOL URLs based on actual file naming patterns from the DOL website"""
@@ -214,7 +169,7 @@ class H1BDataManager:
 
         periods = set()
         for file_name in os.listdir(DATA_CACHE_DIR):
-            match = re.fullmatch(r"LCA_(\d{4})Q([1-4])\.pkl", file_name)
+            match = re.fullmatch(r"LCA_(\d{4})Q([1-4])\.(?:pkl|sqlite)", file_name)
             if match:
                 periods.add((int(match.group(1)), int(match.group(2))))
         return sorted(periods)
@@ -229,6 +184,12 @@ class H1BDataManager:
         keep_periods: list[tuple[int, int]],
     ) -> list[tuple[int, int]]:
         """Delete cached artifacts outside the current six-quarter window."""
+        # Queries now read files throughout an operation. Hold the same data
+        # lock they use, then the per-period lock (the load_data lock order).
+        with self._data_lock:
+            return self._prune_cache(keep_periods)
+
+    def _prune_cache(self, keep_periods: list[tuple[int, int]]) -> list[tuple[int, int]]:
         if not os.path.exists(DATA_CACHE_DIR):
             return []
 
@@ -246,7 +207,7 @@ class H1BDataManager:
             # Coordinate with load_data so an active read/download for the
             # same period finishes before its stale artifact is removed.
             with self._lock_for_period(*period):
-                for extension in ("pkl", "xlsx"):
+                for extension in ("pkl", "xlsx", "sqlite"):
                     artifact_path = os.path.join(
                         DATA_CACHE_DIR,
                         f"LCA_{period[0]}Q{period[1]}.{extension}",
@@ -490,47 +451,42 @@ class H1BDataManager:
             raise ValueError("quarter must be between 1 and 4")
 
         with self._data_lock:
-            # Reuse the resident frame. Previously every request reopened the
-            # same pickle, allowing concurrent calls to retain duplicate
-            # multi-GB DataFrames until garbage collection caught up.
+            # A selected store retains metadata only, never a full quarter.
             if (
                 not force_download
-                and self.df is not None
+                and self.store is not None
                 and (self.loaded_year, self.loaded_quarter) == (year, quarter)
             ):
                 return True
 
             # Retain the period lock as a second line of defence for cache-file
             # writes. The data lock also prevents queries from observing a
-            # frame while another thread switches periods.
+            # store while another thread switches periods.
             with self._lock_for_period(year, quarter):
                 return self._load_period(year, quarter, force_download)
 
     def _load_period(self, year: int, quarter: int, force_download: bool) -> bool:
-        cache_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.pkl")
+        cache_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.sqlite")
+        legacy_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.pkl")
+        source_url = self.get_dol_urls(year, quarter)[0]
+        if not force_download:
+            if os.path.exists(cache_file):
+                try:
+                    self._activate_store(cache_file, year, quarter, source_url)
+                    return True
+                except Exception as error:
+                    print(f"Cannot open indexed cache: {error}")
+            if os.path.exists(legacy_file):
+                try:
+                    self._convert_cache(legacy_file, cache_file)
+                    self._activate_store(cache_file, year, quarter, source_url)
+                    return True
+                except Exception as error:
+                    print(f"Cannot migrate legacy cache: {error}")
+                    # Preserve the original and retry later; do not download a
+                    # second full dataset on top of a failed migration.
+                    return False
 
-        # Maintain the one-frame invariant while pandas deserializes the
-        # replacement. On failure the durable pickle remains available for a
-        # later retry, while the manager truthfully reports itself unloaded.
-        self._discard_loaded_data()
-        
-        # Try loading from cache first
-        if not force_download and os.path.exists(cache_file):
-            try:
-                cached_data = pd.read_pickle(cache_file)
-                if not isinstance(cached_data, pd.DataFrame):
-                    raise TypeError("Cached H-1B data is not a DataFrame")
-                self.df = cached_data
-                self.current_file = cache_file
-                self.last_loaded = datetime.now()
-                self.loaded_year = year
-                self.loaded_quarter = quarter
-                self.source_url = self.get_dol_urls(year, quarter)[0]
-                print(f"Loaded cached data from {cache_file}")
-                return True
-            except Exception as e:
-                print(f"Error loading cached data: {e}")
-        
         # Try downloading from multiple possible URLs
         urls = self.get_dol_urls(year, quarter)
         excel_file = os.path.join(DATA_CACHE_DIR, f"LCA_{year}Q{quarter}.xlsx")
@@ -542,7 +498,7 @@ class H1BDataManager:
                 # First try with curl for DOL URLs (more reliable for government sites)
                 if "dol.gov" in url:
                     try:
-                        print(f"  Using curl to download from DOL...")
+                        print("  Using curl to download from DOL...")
                         # Use curl which handles DOL's security better
                         curl_cmd = [
                             'curl', '-sS', '--fail', '-L', '-o', excel_file,
@@ -572,7 +528,7 @@ class H1BDataManager:
                                 os.remove(excel_file)
                                 continue
                         else:
-                            print(f"Curl download failed - no file created")
+                            print("Curl download failed - no file created")
                             continue
                             
                     except Exception as e:
@@ -627,37 +583,10 @@ class H1BDataManager:
                     os.remove(excel_file)
                     continue
                 
-                # Read the complete Excel file.
-                print(f"Reading Excel file with pandas...")
-                try:
-                    # Use openpyxl engine for .xlsx files. Read the complete
-                    # disclosure: the cache backs six quarters of selectable
-                    # periods, so silently clipping a quarter would make every
-                    # count and chart derived from it incomplete.
-                    self.df = pd.read_excel(excel_file, engine='openpyxl')
-                except Exception as read_error:
-                    print(f"Failed to read Excel with openpyxl: {read_error}")
-                    # Try without specifying engine as fallback
-                    try:
-                        self.df = pd.read_excel(excel_file)
-                    except Exception as fallback_error:
-                        print(f"Failed to read Excel file: {fallback_error}")
-                        os.remove(excel_file)
-                        continue
-                
-                # Cache the processed data
-                self.df.to_pickle(cache_file)
-                self.current_file = cache_file
-                self.last_loaded = datetime.now()
-                self.loaded_year = year
-                self.loaded_quarter = quarter
-                self.source_url = url
-                
-                # Clean up Excel file to save space
-                if os.path.exists(excel_file):
-                    os.remove(excel_file)
-                
-                print(f"Data loaded successfully: {len(self.df)} records")
+                self._convert_cache(excel_file, cache_file)
+                self._activate_store(cache_file, year, quarter, url)
+                os.remove(excel_file)
+                print(f"Data indexed successfully: {len(self.store)} records")
                 return True
                 
             except requests.exceptions.RequestException as e:
@@ -693,13 +622,13 @@ class H1BDataManager:
         return self.load_data(*latest_period)
     
     def is_loaded(self) -> bool:
-        return self.df is not None
+        return self.store is not None
 
-    def get_loaded_data(self) -> pd.DataFrame:
-        """Return the disclosure data after enforcing the loaded-state invariant."""
-        if self.df is None:
+    def get_loaded_data(self) -> DisclosureStore:
+        """Return the selected store; queries open short-lived read connections."""
+        if self.store is None:
             raise RuntimeError("H-1B disclosure data is not loaded")
-        return self.df
+        return self.store
 
     def period_label(self) -> str | None:
         if self.loaded_year is None or self.loaded_quarter is None:
@@ -728,7 +657,7 @@ data_manager = H1BDataManager()
 
 
 def serialized_data_access(function):
-    """Keep each MCP operation on the manager's single resident frame."""
+    """Keep each MCP operation on the manager's selected fiscal period."""
     @wraps(function)
     def wrapped(*args, **kwargs):
         with data_manager.operation():
@@ -822,181 +751,6 @@ def load_h1b_data(
             "message": "Failed to load data. Check year/quarter or try again."
         }
 
-def _get_employer_column(df: pd.DataFrame) -> str:
-    if "EMPLOYER_NAME" in df.columns:
-        return "EMPLOYER_NAME"
-    if "EMPLOYER_BUSINESS_DBA" in df.columns:
-        return "EMPLOYER_BUSINESS_DBA"
-    raise KeyError("Loaded H-1B data has no employer column")
-
-
-def _employer_tokens(value: Any) -> list[str]:
-    if pd.isna(value):
-        return []
-
-    text = unicodedata.normalize("NFKD", str(value)).casefold()
-    text = "".join(
-        character for character in text if not unicodedata.combining(character)
-    )
-    tokens = re.findall(r"[a-z0-9]+", text.replace("&", " and "))
-
-    canonical_tokens: list[str] = []
-    index = 0
-    while index < len(tokens):
-        for source, replacement in _EMPLOYER_ABBREVIATIONS:
-            if tuple(tokens[index : index + len(source)]) == source:
-                canonical_tokens.append(replacement)
-                index += len(source)
-                break
-        else:
-            canonical_tokens.append(tokens[index])
-            index += 1
-
-    return canonical_tokens
-
-
-def _normalise_employer(value: Any) -> str:
-    tokens = _employer_tokens(value)
-    if tokens and tokens[0] == "the":
-        tokens = tokens[1:]
-    original_tokens = tokens.copy()
-
-    while len(tokens) > 1:
-        removed_suffix = False
-        for suffix in _EMPLOYER_LEGAL_SUFFIX_PHRASES:
-            if len(tokens) > len(suffix) and tuple(tokens[-len(suffix) :]) == suffix:
-                del tokens[-len(suffix) :]
-                removed_suffix = True
-                break
-        if removed_suffix:
-            continue
-        if tokens[-1] in _EMPLOYER_LEGAL_SUFFIXES:
-            tokens.pop()
-            continue
-        break
-
-    if not tokens:
-        tokens = original_tokens
-    return "".join(tokens)
-
-
-def _filter_company_rows(
-    df: pd.DataFrame,
-    employer_col: str,
-    company_name: str,
-) -> pd.DataFrame:
-    company_key = _normalise_employer(company_name)
-    if not company_key:
-        return df.iloc[0:0]
-
-    employer_keys = df[employer_col].map(_normalise_employer)
-    match_mask = employer_keys.str.contains(company_key, regex=False, na=False)
-    return cast(pd.DataFrame, df.loc[match_mask])
-
-
-def _python_value(value: Any) -> Any:
-    if pd.isna(value):
-        return None
-    if hasattr(value, "item"):
-        return value.item()
-    return value
-
-
-def _build_company_stats(
-    company_df: pd.DataFrame,
-    employer_col: str,
-    *,
-    period_label: str | None = None,
-    source_url: str | None = None,
-) -> Dict:
-    """Calculate statistics across every loaded position for one company."""
-    if company_df.empty:
-        return {}
-
-    selected_period = (
-        period_label if period_label is not None else data_manager.period_label()
-    )
-    selected_source_url = (
-        source_url if source_url is not None else data_manager.source_url
-    )
-
-    job_col = next(
-        (column for column in ["JOB_TITLE", "SOC_TITLE", "JOB_TITLE_CLEAN"] if column in company_df.columns),
-        None,
-    )
-    wage_col = next(
-        (
-            column
-            for column in [
-                "WAGE_RATE_OF_PAY_FROM",
-                "PREVAILING_WAGE",
-                "WAGE_RATE_OF_PAY",
-            ]
-            if column in company_df.columns
-        ),
-        None,
-    )
-
-    stats = {
-        "company": company_df[employer_col].iloc[0],
-        "total_applications": int(len(company_df)),
-        "certified": (
-            int(
-                company_df["CASE_STATUS"]
-                .astype(str)
-                .str.casefold()
-                .eq("certified")
-                .sum()
-            )
-            if "CASE_STATUS" in company_df.columns
-            else "N/A"
-        ),
-        "denied": (
-            int(
-                company_df["CASE_STATUS"]
-                .astype(str)
-                .str.casefold()
-                .eq("denied")
-                .sum()
-            )
-            if "CASE_STATUS" in company_df.columns
-            else "N/A"
-        ),
-        "fiscal_periods": [selected_period],
-        "data_version": selected_period,
-        "source_url": selected_source_url,
-    }
-
-    if isinstance(stats["certified"], int):
-        stats["certification_rate"] = round(
-            stats["certified"] / len(company_df) * 100,
-            2,
-        )
-
-    if job_col:
-        stats["top_job_titles"] = {
-            str(job_title): int(count)
-            for job_title, count in company_df[job_col].value_counts().head(10).items()
-        }
-
-    if wage_col:
-        wages = pd.to_numeric(company_df[wage_col], errors="coerce")
-        stats["wage_stats"] = {
-            "min": _python_value(wages.min()),
-            "max": _python_value(wages.max()),
-            "mean": _python_value(wages.mean()),
-            "median": _python_value(wages.median()),
-        }
-
-    if "WORKSITE_STATE" in company_df.columns:
-        stats["top_states"] = {
-            str(state): int(count)
-            for state, count in company_df["WORKSITE_STATE"].value_counts().head(5).items()
-        }
-
-    return stats
-
-
 @mcp.tool(
     description=(
         "Search H-1B sponsoring companies by job role and location. Each "
@@ -1021,7 +775,7 @@ def search_h1b_jobs(
         city: Work city (optional)
         state: Work state code (optional)
         min_wage: Minimum wage filter (optional)
-        max_results: Maximum results to return (default: 50)
+        max_results: Maximum results to return, from 0 to 1000 (default: 50)
         skip_agencies: Skip staffing agencies (default: True)
     
     Returns:
@@ -1030,97 +784,10 @@ def search_h1b_jobs(
     if not data_manager.ensure_latest_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
     
-    all_df = data_manager.get_loaded_data()
-    df = all_df
-
-    employer_col = _get_employer_column(all_df)
-    
-    job_columns = ['JOB_TITLE', 'SOC_TITLE', 'JOB_TITLE_CLEAN']
-    job_col = None
-    for col in job_columns:
-        if col in df.columns:
-            job_col = col
-            break
-    
-    if job_col:
-        df = df[df[job_col].str.contains(job_role, case=False, na=False)]
-    
-    if city and 'WORKSITE_CITY' in df.columns:
-        df = df[df['WORKSITE_CITY'].str.contains(city, case=False, na=False)]
-    elif city and 'EMPLOYER_CITY' in df.columns:
-        df = df[df['EMPLOYER_CITY'].str.contains(city, case=False, na=False)]
-    
-    if state:
-        if 'WORKSITE_STATE' in df.columns:
-            df = df[df['WORKSITE_STATE'].str.upper() == state.upper()]
-        elif 'EMPLOYER_STATE' in df.columns:
-            df = df[df['EMPLOYER_STATE'].str.upper() == state.upper()]
-    
-    wage_col = None
-    for col in ['WAGE_RATE_OF_PAY_FROM', 'PREVAILING_WAGE', 'WAGE_RATE_OF_PAY']:
-        if col in df.columns:
-            wage_col = col
-            break
-    
-    if min_wage and wage_col:
-        wages = pd.to_numeric(df[wage_col], errors='coerce')
-        df = df[wages >= min_wage]
-    
-    if skip_agencies and 'EMPLOYER_NAME' in df.columns:
-        agency_keywords = [
-            'staffing', 'consulting', 'agency', 'infosys', 'tcs', 
-            'wipro', 'cognizant', 'hcl', 'tech mahindra', 'accenture'
-        ]
-        mask = ~df['EMPLOYER_NAME'].str.contains('|'.join(agency_keywords), case=False, na=False)
-        df = df[mask]
-    
-    status_col = 'CASE_STATUS' if 'CASE_STATUS' in df.columns else None
-    if status_col:
-        df = df[df[status_col].astype(str).str.casefold() == 'certified']
-    
-    all_employer_keys = all_df[employer_col].map(_normalise_employer)
-    company_stats_by_key = {}
-    for employer in df[employer_col].dropna().unique():
-        employer_key = _normalise_employer(employer)
-        company_stats_by_key[employer_key] = _build_company_stats(
-            all_df[all_employer_keys == employer_key],
-            employer_col,
-        )
-    
-    results = []
-    for _, row in df.head(max_results).iterrows():
-        result = {
-            "employer": row.get(employer_col, "Unknown"),
-            "job_title": row.get(job_col, "Unknown"),
-            "city": row.get('WORKSITE_CITY', row.get('EMPLOYER_CITY', "Unknown")),
-            "state": row.get('WORKSITE_STATE', row.get('EMPLOYER_STATE', "Unknown")),
-        }
-
-        company_stats = company_stats_by_key.get(
-            _normalise_employer(row.get(employer_col))
-        )
-        if company_stats:
-            result["company_stats"] = company_stats
-        
-        if wage_col:
-            result["wage"] = row.get(wage_col, "N/A")
-        
-        contact_fields = ['EMPLOYER_POC_EMAIL', 'CONTACT_EMAIL', 'EMPLOYER_PHONE']
-        for field in contact_fields:
-            if field in row and pd.notna(row[field]):
-                result["contact"] = row[field]
-                break
-        
-        results.append(result)
-    
-    return {
-        "total_matches": len(df),
-        "returned": len(results),
-        "results": results,
-        "fiscal_periods": [data_manager.period_label()],
-        "data_version": data_manager.period_label(),
-        "source_url": data_manager.source_url,
-    }
+    return data_manager.get_loaded_data().search(
+        job_role, city, state, min_wage, max_results, skip_agencies,
+        data_manager.period_label(), data_manager.source_url,
+    )
 
 @mcp.tool(
     description=(
@@ -1217,17 +884,9 @@ def _company_stats_for_loaded_period(
     company_name: str,
     period_label: str,
 ) -> Dict | None:
-    """Build compact stats without leaking a reference to the full frame."""
-    period_df = data_manager.get_loaded_data()
-    employer_col = _get_employer_column(period_df)
-    company_df = _filter_company_rows(period_df, employer_col, company_name)
-    if company_df.empty:
-        return None
-    return _build_company_stats(
-        company_df,
-        employer_col,
-        period_label=period_label,
-        source_url=data_manager.source_url,
+    """Aggregate on disk, including the median, without collecting company rows."""
+    return data_manager.get_loaded_data().company_stats(
+        company_name, period_label, data_manager.source_url,
     )
 
 
@@ -1323,7 +982,7 @@ def export_results(
         city: City filter (optional)
         state: State filter (optional)
         filename: Output filename (default: h1b_results.csv)
-        max_results: Maximum results to export (default: 1000)
+        max_results: Maximum results to export, from 0 to 1000 (default: 1000)
     
     Returns:
         File path and export statistics
@@ -1342,16 +1001,16 @@ def export_results(
     if "error" in search_results:
         return search_results
     
-    df_export = pd.DataFrame(search_results["results"])
-    
+    rows = search_results["results"]
     export_path = os.path.join(DATA_CACHE_DIR, filename)
-    df_export.to_csv(export_path, index=False)
-    
+    with open(export_path, 'w', newline='', encoding='utf-8') as output:
+        columns = list(dict.fromkeys(key for row in rows for key in row))
+        writer = csv.DictWriter(output, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
     return {
-        "status": "success",
-        "file_path": export_path,
-        "records_exported": len(df_export),
-        "total_matches": search_results["total_matches"]
+        "status": "success", "file_path": export_path,
+        "records_exported": len(rows), "total_matches": search_results["total_matches"],
     }
 
 @mcp.tool(description="List top H-1B sponsoring companies by volume")
@@ -1361,7 +1020,7 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     Get top H-1B sponsoring companies by application volume.
     
     Args:
-        limit: Number of companies to return (default: 20)
+        limit: Number of companies to return, from 0 to 1000 (default: 20)
         exclude_agencies: Exclude staffing agencies (default: True)
     
     Returns:
@@ -1370,51 +1029,7 @@ def get_top_sponsors(limit: int = 20, exclude_agencies: bool = True) -> Dict:
     if not data_manager.ensure_latest_loaded():
         return {"error": "Data not loaded. Please run load_h1b_data first."}
     
-    df = data_manager.get_loaded_data()
-    
-    employer_col = 'EMPLOYER_NAME' if 'EMPLOYER_NAME' in df.columns else 'EMPLOYER_BUSINESS_DBA'
-    
-    if exclude_agencies:
-        agency_keywords = [
-            'staffing', 'consulting', 'agency', 'infosys', 'tcs',
-            'wipro', 'cognizant', 'hcl', 'tech mahindra', 'accenture'
-        ]
-        mask = ~df[employer_col].str.contains('|'.join(agency_keywords), case=False, na=False)
-        df = df[mask]
-    
-    top_companies = df[employer_col].value_counts().head(limit)
-    
-    results = []
-    for company, count in top_companies.items():
-        company_df = df[df[employer_col] == company]
-        
-        wage_col = None
-        for col in ['WAGE_RATE_OF_PAY_FROM', 'PREVAILING_WAGE', 'WAGE_RATE_OF_PAY']:
-            if col in df.columns:
-                wage_col = col
-                break
-        
-        result = {
-            "company": company,
-            "total_applications": count,
-            "certified": len(company_df[company_df.get('CASE_STATUS', '') == 'CERTIFIED']) if 'CASE_STATUS' in company_df.columns else count,
-        }
-        
-        if wage_col:
-            result["avg_wage"] = pd.to_numeric(
-                company_df[wage_col],
-                errors='coerce',
-            ).mean()
-        
-        if 'WORKSITE_STATE' in company_df.columns:
-            result["primary_state"] = company_df['WORKSITE_STATE'].mode()[0] if len(company_df['WORKSITE_STATE'].mode()) > 0 else "N/A"
-        
-        results.append(result)
-    
-    return {
-        "top_sponsors": results,
-        "total_companies": df[employer_col].nunique()
-    }
+    return data_manager.get_loaded_data().top_sponsors(limit, exclude_agencies)
 
 @mcp.tool(description="Talk to the H-1B search in simple words - I'll figure out what you want")
 @serialized_data_access
@@ -1442,7 +1057,7 @@ def ask(prompt: str) -> Dict:
             num_str = match.group(1).replace(',', '').replace('$', '').replace('k', '000')
             try:
                 return int(float(num_str))
-            except:
+            except (ValueError, OverflowError):
                 pass
         return default
     
@@ -1535,12 +1150,6 @@ def ask(prompt: str) -> Dict:
         # Extract location - city and/or state
         city = None
         state = None
-        
-        # Common city patterns
-        city_patterns = [
-            r'in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s*,?\s*([A-Z]{2})',  # City, State
-            r'(?:in|at|near)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)',  # City name
-        ]
         
         # Check for city, state pattern first
         match = re.search(r'in\s+([A-Za-z]+(?:\s+[A-Za-z]+)?)\s*,?\s*([A-Z]{2})', original_prompt)
@@ -1774,7 +1383,8 @@ def get_available_data() -> Dict:
     """
     cached_periods = data_manager.get_cached_periods()
     cached_files = [
-        f"LCA_{year}Q{quarter}.pkl" for year, quarter in cached_periods
+        name for name in sorted(os.listdir(DATA_CACHE_DIR))
+        if re.fullmatch(r"LCA_\d{4}Q[1-4]\.(?:pkl|sqlite)", name)
     ]
 
     # Startup normally performs this check already, but make the inspection

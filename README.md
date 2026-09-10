@@ -6,7 +6,9 @@ An MCP (Model Context Protocol) server that automates H-1B job searching using *
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/aryaminus/h1b-job-search-mcp)
 
-Note: Due to limitation of memory on the free instance, the server tends to go down. I'm happy to accept server donations for hosting.
+Disclosure data is indexed on disk, with bounded query caches instead of a
+resident pandas dataset. See [memory architecture and Railway rollout](docs/memory-architecture.md)
+for measurements, migration behavior, and volume requirements.
 
 ## ✅ Real Data, Not Samples
 
@@ -63,7 +65,7 @@ Search for H-1B sponsoring companies by job role and location.
   - `city`: Work city (optional)
   - `state`: Work state code (optional, e.g., "CA")
   - `min_wage`: Minimum wage filter (optional)
-  - `max_results`: Maximum results to return
+  - `max_results`: Maximum results to return (0–1,000; default: 50)
   - `skip_agencies`: Skip staffing agencies (default: true)
 
 Each returned position includes `company_stats`, calculated across all loaded
@@ -92,7 +94,7 @@ six-quarter window. This is the chart-ready source for sponsorship-volume plots.
 List top H-1B sponsoring companies by application volume.
 
 - **Parameters**:
-  - `limit`: Number of companies to return
+  - `limit`: Number of companies to return (0–1,000; default: 20)
   - `exclude_agencies`: Exclude staffing agencies
 
 ### 6. `export_results`
@@ -104,7 +106,7 @@ Export filtered H-1B results to a CSV file.
   - `city`: City filter (optional)
   - `state`: State filter (optional)
   - `filename`: Output filename
-  - `max_results`: Maximum results to export
+  - `max_results`: Maximum results to export (0–1,000; default: 1,000)
 
 ### 7. `get_available_data`
 
@@ -282,8 +284,8 @@ def custom_analysis(parameter: str) -> dict:
 
 - **Data not loading**: Check your internet connection and verify the year/quarter exists
 - **No results found**: Try broader search terms or check different quarters
-- **Memory issues**: The full dataset can be large; consider using `nrows` parameter in pandas
-- **Cache issues**: Delete the `data_cache` directory to force fresh downloads
+- **Memory issues**: Use the indexed `.sqlite` cache on a persistent volume. The first conversion of an old pickle temporarily uses more RAM in a separate importer process. Never truncate the disclosure: counts and wage statistics require all rows.
+- **Cache issues**: Check free volume space and importer logs. A failed conversion leaves the original cache intact; retry loading that quarter. Use `force_download` only when the source needs refreshing.
 
 ## Contributing
 
