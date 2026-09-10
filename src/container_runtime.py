@@ -15,6 +15,11 @@ def main():
         import pwd
 
         account = pwd.getpwnam("appuser")
+        # setuid does not update the environment. Libraries resolving user
+        # caches must never keep trying to access root's private home.
+        os.environ["HOME"] = account.pw_dir
+        os.environ.setdefault("XDG_CACHE_HOME", f"{account.pw_dir}/.cache")
+        os.environ.setdefault("XDG_DATA_HOME", f"{account.pw_dir}/.local/share")
         # Existing pickles only need read access. Owning the parent permits
         # atomic index replacement without recursively rewriting the volume.
         for directory in (cache, temporary):

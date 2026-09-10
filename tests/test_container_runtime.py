@@ -10,11 +10,16 @@ def test_volume_ownership_is_repaired_before_dropping_privileges(tmp_path, monke
     events = []
     monkeypatch.setenv("H1B_DATA_CACHE_DIR", str(tmp_path))
     monkeypatch.delenv("SQLITE_TMPDIR", raising=False)
+    monkeypatch.setenv("HOME", "/root")
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     monkeypatch.setitem(
         sys.modules,
         "pwd",
         SimpleNamespace(
-            getpwnam=lambda name: SimpleNamespace(pw_uid=1234, pw_gid=5678)
+            getpwnam=lambda name: SimpleNamespace(
+                pw_uid=1234, pw_gid=5678, pw_dir="/home/appuser"
+            )
         ),
     )
     monkeypatch.setattr(container_runtime.os, "getuid", lambda: 0, raising=False)
@@ -37,3 +42,6 @@ def test_volume_ownership_is_repaired_before_dropping_privileges(tmp_path, monke
     assert events[0][1] == (tmp_path, 1234, 5678)
     assert events[4][1] == (1234,)
     assert container_runtime.os.environ["SQLITE_TMPDIR"] == str(tmp_path / "tmp")
+    assert container_runtime.os.environ["HOME"] == "/home/appuser"
+    assert container_runtime.os.environ["XDG_CACHE_HOME"] == "/home/appuser/.cache"
+    assert container_runtime.os.environ["XDG_DATA_HOME"] == "/home/appuser/.local/share"
