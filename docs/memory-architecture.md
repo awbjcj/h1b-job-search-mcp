@@ -142,6 +142,24 @@ was unavailable.
 
 ## Production evidence and verification
 
+### Current 30-minute idle policy
+
+Revision `723490d` passed 56 local tests and deployed successfully as
+`65f55c47-e2b1-460c-90fd-1232e2b5f694`. An isolated process running as Linux
+UID 1000 verified the 1,800-second default, timer reset, active-reader protection,
+and background release using an injected clock; it preserved the fixture bytes.
+This was an accelerated test, not a real 30-minute wait on the production server.
+
+Two rounds of actual production MCP calls (10 responses) matched baseline
+fingerprints. Warm second-round timings were 0.182/0.186 seconds for company
+lookups, 0.498 seconds for filtered search, 2.412 seconds for top sponsors, and
+0.541 seconds for the six-quarter trend. Container memory including the probe
+was approximately 921 MB with 830 MB of file cache, as intended during active
+use. Pages remain eligible for cleanup after each file's 30-minute idle period.
+These single-run timings are not a throughput benchmark.
+
+### Earlier immediate-release measurements
+
 The SQLite refactor reached `main` at `863a901`, deployed successfully as
 `abb6429f-9e27-437c-ac64-40c39f9badc6`, and converted all six production caches.
 The initial 73–85 MB Railway readings were fresh-start readings, not evidence
