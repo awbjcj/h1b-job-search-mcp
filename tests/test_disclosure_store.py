@@ -46,6 +46,7 @@ def test_aggregates_cover_all_rows_and_numeric_wages(tmp_path):
     ]
     store = build(tmp_path / "quarter.sqlite", rows)
     stats = store.company_stats("Acme", "FY2026 Q3", "source")
+    assert stats is not None
     assert stats["total_applications"] == 4
     assert stats["certified"] == 2
     assert stats["denied"] == 1
@@ -69,9 +70,12 @@ def test_odd_median_empty_wages_and_dba_column(tmp_path):
     )
     store = DisclosureStore(str(target))
     stats = store.company_stats("Example", None, None)
+    assert stats is not None
     assert stats["wage_stats"]["median"] == 7
     assert stats["certified"] == "N/A"
-    assert store.company_stats("Empty", None, None)["wage_stats"] == dict.fromkeys(
+    empty_stats = store.company_stats("Empty", None, None)
+    assert empty_stats is not None
+    assert empty_stats["wage_stats"] == dict.fromkeys(
         ("min", "max", "mean", "median")
     )
     assert (
@@ -91,12 +95,9 @@ def test_atomic_replacement_preserves_old_database_on_import_failure(tmp_path):
 
     with pytest.raises(RuntimeError, match="importer crash"):
         write_database(target, COLUMNS, interrupted())
-    assert (
-        DisclosureStore(str(target)).company_stats("Original", None, None)[
-            "total_applications"
-        ]
-        == 1
-    )
+    stats = DisclosureStore(str(target)).company_stats("Original", None, None)
+    assert stats is not None
+    assert stats["total_applications"] == 1
     assert list(tmp_path.iterdir()) == [target]
 
 
@@ -111,6 +112,7 @@ def test_streamed_workbook_keeps_all_batches(tmp_path):
     workbook.close()
     assert convert(source, target) == 2501
     stats = DisclosureStore(str(target)).company_stats("Acme", None, None)
+    assert stats is not None
     assert stats["total_applications"] == 2501
     assert stats["wage_stats"]["median"] == 1250
 
@@ -190,7 +192,9 @@ def test_nullable_legacy_columns_are_stored_as_null(tmp_path):
     ).to_pickle(source)
     assert convert(source, target) == 2
     store = DisclosureStore(str(target))
-    assert store.company_stats("Acme", None, None)["wage_stats"]["mean"] == 100
+    stats = store.company_stats("Acme", None, None)
+    assert stats is not None
+    assert stats["wage_stats"]["mean"] == 100
 
 
 def test_top_sponsors_filters_agencies_and_casefolds_status(tmp_path):

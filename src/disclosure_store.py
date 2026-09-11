@@ -5,6 +5,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from employers import _normalise_employer
 from file_cache import query_file_cache
@@ -52,7 +53,7 @@ class DisclosureStore:
                 if not r[1].startswith("_h1b_")
             ]
             self.row_count = db.execute("SELECT row_count FROM metadata").fetchone()[0]
-        self.employer = next(
+        employer = next(
             (
                 c
                 for c in ("EMPLOYER_NAME", "EMPLOYER_BUSINESS_DBA")
@@ -60,8 +61,9 @@ class DisclosureStore:
             ),
             None,
         )
-        if self.employer is None:
+        if employer is None:
             raise ValueError("Loaded H-1B data has no employer column")
+        self.employer: str = employer
         self.job = next((c for c in JOB_COLUMNS if c in self.columns), None)
         self.wage = next((c for c in WAGE_COLUMNS if c in self.columns), None)
 
@@ -100,7 +102,9 @@ class DisclosureStore:
         finally:
             db.close()
 
-    def _stats(self, db, where, args, period_label, source_url):
+    def _stats(
+        self, db, where, args, period_label, source_url
+    ) -> dict[str, Any] | None:
         employer = quote(self.employer)
         count = db.execute(
             f"SELECT count(*) FROM disclosures WHERE {where}", args
@@ -111,7 +115,7 @@ class DisclosureStore:
             f"SELECT {employer} FROM disclosures WHERE {where} ORDER BY rowid LIMIT 1",
             args,
         ).fetchone()[0]
-        stats = dict(
+        stats: dict[str, Any] = dict(
             company=name,
             total_applications=count,
             certified="N/A",
@@ -156,7 +160,7 @@ class DisclosureStore:
         return stats
 
     @staticmethod
-    def _groups(db, column, where, args, limit):
+    def _groups(db, column, where, args, limit) -> dict[str, int]:
         col = quote(column)
         # Ties follow first occurrence, as pandas.value_counts does.
         return {
@@ -168,7 +172,9 @@ class DisclosureStore:
             )
         }
 
-    def company_stats(self, company_name, period_label, source_url):
+    def company_stats(
+        self, company_name, period_label, source_url
+    ) -> dict[str, Any] | None:
         key = _normalise_employer(company_name)
         if not key:
             return None
@@ -192,7 +198,7 @@ class DisclosureStore:
         skip_agencies,
         period_label,
         source_url,
-    ):
+    ) -> dict[str, Any]:
         if not 0 <= max_results <= MAX_RESULTS:
             return {"error": f"max_results must be between 0 and {MAX_RESULTS}"}
         clauses, args = [], []
@@ -222,7 +228,8 @@ class DisclosureStore:
         if "CASE_STATUS" in self.columns:
             clauses.append("casefold(CASE_STATUS) = 'certified'")
         where = " AND ".join(clauses) or "1"
-        results, company_stats = [], {}
+        results: list[dict[str, Any]] = []
+        company_stats: dict[str, dict[str, Any] | None] = {}
         with self.connect() as db:
             total = db.execute(
                 f"SELECT count(*) FROM disclosures WHERE {where}", args
@@ -245,7 +252,7 @@ class DisclosureStore:
             ).fetchall()
             for values in rows:
                 row = dict(zip(columns, values))
-                result = dict(
+                result: dict[str, Any] = dict(
                     employer=row.get(self.employer, "Unknown"),
                     job_title=row.get(self.job, "Unknown"),
                     city=row.get(city_col, "Unknown"),
@@ -274,7 +281,7 @@ class DisclosureStore:
             source_url=source_url,
         )
 
-    def top_sponsors(self, limit, exclude_agencies):
+    def top_sponsors(self, limit, exclude_agencies) -> dict[str, Any]:
         if not 0 <= limit <= MAX_RESULTS:
             return {"error": f"limit must be between 0 and {MAX_RESULTS}"}
         col = quote(self.employer)
@@ -297,7 +304,7 @@ class DisclosureStore:
                 (*args, limit),
             ).fetchall()
             for company, count, certified_count, mean in top:
-                result = dict(
+                result: dict[str, Any] = dict(
                     company=company,
                     total_applications=count,
                     certified=certified_count,

@@ -11,10 +11,11 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     temporary.mkdir(exist_ok=True)
     os.environ.setdefault("SQLITE_TMPDIR", str(temporary))
-    if os.getuid() == 0:
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None and getuid() == 0:
         import pwd
 
-        account = pwd.getpwnam("appuser")
+        account = getattr(pwd, "getpwnam")("appuser")
         # setuid does not update the environment. Libraries resolving user
         # caches must never keep trying to access root's private home.
         os.environ["HOME"] = account.pw_dir
@@ -23,10 +24,10 @@ def main():
         # Existing pickles only need read access. Owning the parent permits
         # atomic index replacement without recursively rewriting the volume.
         for directory in (cache, temporary):
-            os.chown(directory, account.pw_uid, account.pw_gid)
-        os.setgroups([])
-        os.setgid(account.pw_gid)
-        os.setuid(account.pw_uid)
+            getattr(os, "chown")(directory, account.pw_uid, account.pw_gid)
+        getattr(os, "setgroups")([])
+        getattr(os, "setgid")(account.pw_gid)
+        getattr(os, "setuid")(account.pw_uid)
     os.execv(
         sys.executable, [sys.executable, str(Path(__file__).with_name("server.py"))]
     )

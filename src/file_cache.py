@@ -51,7 +51,7 @@ class IdleFileCache:
                 del self._files[path]
             return len(expired)
 
-    async def run(self, interval=CACHE_SWEEP_SECONDS):
+    async def run(self, interval: float = CACHE_SWEEP_SECONDS):
         while True:
             await asyncio.sleep(interval)
             await asyncio.to_thread(self.evict_idle)

@@ -401,6 +401,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertTrue(manager.load_data(2026, 1))
         self.assertFalse(hasattr(manager, 'df'))
         self.assertEqual(manager.period_label(), 'FY2026 Q1')
+        assert manager.store is not None
         self.assertEqual(manager.store.row_count, 1)
 
     def test_failed_period_load_preserves_current_store(self):
@@ -412,7 +413,10 @@ class H1BServerTests(unittest.TestCase):
             self.assertFalse(manager.load_data(2026, 2))
         self.assertIs(manager.store, original)
         self.assertEqual(manager.period_label(), 'FY2026 Q1')
-        self.assertEqual(manager.store.company_stats('Google', None, None)['total_applications'], 1)
+        assert original is not None
+        stats = original.company_stats('Google', None, None)
+        assert stats is not None
+        self.assertEqual(stats['total_applications'], 1)
 
     def test_failed_legacy_migration_preserves_pickle_without_redownload(self):
         disclosure_rows().to_pickle(Path(self._temp_dir.name) / 'LCA_2026Q1.pkl')

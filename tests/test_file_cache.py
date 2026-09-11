@@ -64,7 +64,9 @@ def test_query_failure_schedules_release_after_connection_closes(tmp_path, monke
     with pytest.raises(OSError):
         os.fstat(descriptors[0])
     monkeypatch.delattr(file_cache.os, "posix_fadvise")
-    assert store.company_stats("Acme", None, None)["total_applications"] == 1
+    stats = store.company_stats("Acme", None, None)
+    assert stats is not None
+    assert stats["total_applications"] == 1
 
 
 def test_import_releases_committed_database_and_source(tmp_path, monkeypatch):

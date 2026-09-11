@@ -91,7 +91,7 @@ class H1BDataManager:
         with self._data_lock:
             yield
 
-    def _activate_store(self, path, year, quarter, source_url):
+    def _activate_store(self, path, year, quarter, source_url) -> DisclosureStore:
         store = DisclosureStore(path)
         self.store = store
         self.current_file = path
@@ -99,6 +99,7 @@ class H1BDataManager:
         self.loaded_year = year
         self.loaded_quarter = quarter
         self.source_url = source_url
+        return store
 
     def _convert_cache(self, source, destination):
         # Keep import-only libraries and transient allocations out of the server.
@@ -585,9 +586,9 @@ class H1BDataManager:
                     continue
                 
                 self._convert_cache(excel_file, cache_file)
-                self._activate_store(cache_file, year, quarter, url)
+                store = self._activate_store(cache_file, year, quarter, url)
                 os.remove(excel_file)
-                print(f"Data indexed successfully: {len(self.store)} records")
+                print(f"Data indexed successfully: {len(store)} records")
                 return True
                 
             except requests.exceptions.RequestException as e:
