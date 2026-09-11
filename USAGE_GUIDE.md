@@ -1,12 +1,14 @@
-# H-1B Job Search MCP: Usage Guide 🎯
+# H-1B Job Search MCP: usage guide
 
-Welcome to the **H-1B Job Search MCP**! This guide will help you find H-1B sponsoring companies through simple, natural conversations with your AI assistant.
+Use the **H-1B Job Search MCP** to explore historical H-1B sponsorship data
+through a compatible AI client. The data is a research signal, not a promise
+that an employer currently sponsors or is hiring.
 
-## 🚀 Quick Start
+## Quick start
 
-The H-1B Job Search MCP understands natural language! Just tell it what you want in plain English. Here are the most common things people ask:
+Ask for the data you need in plain English. These are common requests.
 
-### 1. Getting Started - Load the Data
+### 1. Load data
 
 ```
 "Load the latest H-1B data"
@@ -14,7 +16,7 @@ The H-1B Job Search MCP understands natural language! Just tell it what you want
 "Download fresh H-1B sponsor data"
 ```
 
-Your AI will respond with:
+Typical result:
 ```
 ✅ Successfully loaded the latest available H-1B disclosure period
 📅 The response includes the exact fiscal year and quarter that were loaded
@@ -22,7 +24,7 @@ Your AI will respond with:
 💡 Ready to search! Try: "Find software engineer jobs in California"
 ```
 
-### 2. Finding Your Dream Job
+### 2. Find jobs
 
 #### Basic Job Search
 ```
@@ -38,21 +40,21 @@ Your AI will respond with:
 "I want data analyst positions in New York City"
 ```
 
-#### With Salary Requirements
+#### Search by salary
 ```
 "Find software engineer jobs paying over $150,000"
 "Show me data scientist roles in California with minimum $120k salary"
 "I need tech jobs in Austin paying at least $100,000"
 ```
 
-#### Excluding Staffing Agencies
+#### Exclude staffing agencies
 ```
 "Find direct hire software engineer positions (no agencies)"
 "Show me companies directly hiring data scientists, skip the consultancies"
 "I want product manager jobs but not from staffing companies"
 ```
 
-### 3. Researching Companies
+### 3. Research companies
 
 ```
 "Tell me about Google's H-1B sponsorships"
@@ -61,7 +63,7 @@ Your AI will respond with:
 "Show me Amazon's H-1B statistics"
 ```
 
-Your AI will provide:
+Typical result:
 ```
 📊 Google H-1B Statistics:
 - Total Applications: 1,234
@@ -72,7 +74,7 @@ Your AI will provide:
 - Top Locations: Mountain View (CA), New York (NY), Seattle (WA)
 ```
 
-### 4. Finding Top Sponsors
+### 4. Find top sponsors
 
 ```
 "Who are the top H-1B sponsors?"
@@ -80,7 +82,7 @@ Your AI will provide:
 "Which companies sponsor the most H-1B visas (not agencies)?"
 ```
 
-### 5. Exporting Your Results
+### 5. Export results
 
 ```
 "Export software engineer jobs in California to a spreadsheet"
@@ -88,37 +90,40 @@ Your AI will provide:
 "Create an Excel file with all Python developer positions"
 ```
 
-## 💬 Natural Language Examples
+## Natural-language prompts
 
-The H-1B MCP is smart enough to understand various ways of asking for the same thing:
+The tool accepts different phrasings for the same request.
 
-### Different Ways to Search for Jobs
+### Search prompts
 
-All of these work:
+These prompts express the same goal:
 - "I'm a software engineer looking for jobs in the Bay Area"
 - "Help me find SWE positions in Silicon Valley"
 - "software developer opportunities san francisco"
 - "coding jobs near San Jose, California"
 - "I want to work as a programmer in the Bay Area"
 
-### Different Ways to Filter
+### Filter prompts
 
-These all do the same thing:
+These prompts apply the same salary filter:
 - "...paying over 150k"
 - "...with salary above $150,000"
 - "...minimum compensation 150000"
 - "...at least 150K per year"
 
-### Different Ways to Exclude Agencies
+### Exclude-agency prompts
 
-All of these skip staffing companies:
+These prompts exclude staffing companies:
 - "...no agencies"
 - "...direct hire only"
 - "...skip consultancies"
 - "...not from staffing firms"
 - "...avoid Infosys, TCS, Wipro"
 
-## 📋 Complete Workflow Examples
+## Example workflows
+
+The figures in these examples are illustrative. Query the data to see the
+current results for a company, role, or location.
 
 ### Example 1: Fresh Graduate Software Engineer
 
@@ -209,39 +214,39 @@ AI: H-1B Approval Rates (Seattle tech companies):
 3. Tableau: 95.8% approval rate
 ```
 
-## 🎯 Pro Tips for Better Results
+## Practical search tips
 
-### 1. Be Specific About Your Role
+### 1. Name the role
 Instead of: "tech jobs"
 Try: "backend engineer", "iOS developer", "machine learning engineer"
 
-### 2. Use Standard Job Titles
+### 2. Use standard job titles
 The database uses common titles like:
 - Software Engineer (not "Coder")
 - Data Scientist (not "Data Wizard")
 - Product Manager (not "Product Owner")
 
-### 3. Specify Exact Locations When Possible
+### 3. Specify locations when possible
 - Use state codes: "CA", "NY", "TX"
-- Major cities work great: "San Francisco", "New York", "Austin"
+- Major cities also work: "San Francisco", "New York", "Austin"
 
-### 4. Chain Your Searches
+### 4. Narrow the search in stages
 Start broad, then narrow:
 1. "Show me all data science jobs"
 2. "Filter those for California"
 3. "Now show only those paying over $150k"
 4. "Remove staffing agencies"
 
-### 5. Research Before Applying
+### 5. Research before applying
 Always check:
 - Company's H-1B approval rate
 - Average salaries for your role
 - Number of similar positions sponsored
 - Primary office locations
 
-## 🔍 Understanding the Results
+## Understanding results
 
-### What the Data Shows You
+### What the data shows
 
 **For Job Searches:**
 - Company name (actual employer)
@@ -265,9 +270,9 @@ Always check:
 - Average wages offered
 - Primary state of operation
 
-## 📊 Data Insights
+## Data details
 
-### Best Times to Search
+### When new data appears
 - New quarter data becomes available ~45 days after quarter end
 - Q4 data (October-December) available in mid-February
 - Q1 data (January-March) available in mid-May
@@ -284,23 +289,23 @@ Salaries in the database are:
 - Usually doesn't include bonuses/stock
 - Regional variations apply
 
-## 🚫 Common Mistakes to Avoid
+## Avoid these common search errors
 
-### ❌ Don't Do This:
+### Broad or ambiguous prompts
 ```
 "Show me all jobs" (too broad, will return too many results)
 "Find work" (too vague)
 "H1B" (need to specify what you want to know)
 ```
 
-### ✅ Do This Instead:
+### More useful alternatives
 ```
 "Find software engineer jobs in California"
 "Show me data scientist positions paying over $120k"
 "Which companies sponsor the most H-1B visas?"
 ```
 
-## 🆘 Troubleshooting
+## Troubleshooting
 
 ### "No data loaded"
 **Solution:** First run: "Load the latest H-1B data"
@@ -317,7 +322,7 @@ Salaries in the database are:
 - Add salary filter: "...paying over $100k"
 - Exclude agencies: "...no staffing agencies"
 
-## 🎓 Advanced Searches
+## Advanced queries
 
 ### Combining Multiple Criteria
 ```
@@ -338,7 +343,7 @@ for software engineer positions"
 in Q1 vs Q2 vs Q3 vs Q4 of 2024"
 ```
 
-## 📝 Quick Reference Card
+## Quick reference
 
 | What You Want | What to Say |
 |--------------|-------------|
@@ -351,15 +356,14 @@ in Q1 vs Q2 vs Q3 vs Q4 of 2024"
 | Top sponsors | "Top H-1B sponsors" |
 | Export | "Export results to CSV" |
 
-## 🎯 Your Journey Starts Here!
+## A simple starting sequence
 
 1. **Load the data**: "Load the latest H-1B data"
 2. **Search for your role**: "Find [your job title] positions"
 3. **Filter by location**: "...in [your preferred city]"
 4. **Research companies**: "Tell me about [company name]"
 5. **Export results**: "Save these results to a file"
-6. **Apply strategically**: Use the data to focus on companies with high approval rates
+6. **Use the data carefully**: Treat historical filing patterns as one input to your research.
 
-Remember: The H-1B MCP is here to help you make data-driven decisions in your job search. The more specific you are, the better results you'll get!
-
-Good luck with your H-1B job search! 🚀
+More specific requests return more focused results. Verify current sponsorship
+policies and open roles with each employer before you apply.

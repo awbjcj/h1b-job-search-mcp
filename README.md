@@ -1,16 +1,20 @@
-# H1B Job Search MCP Server
+# H-1B Job Search MCP server
 
-An MCP (Model Context Protocol) server that automates H-1B job searching using **REAL** U.S. Department of Labor LCA disclosure data. Built with [FastMCP](https://github.com/jlowin/fastmcp).
+An MCP (Model Context Protocol) server for searching public U.S. Department of
+Labor LCA disclosure data. It is built with [FastMCP](https://github.com/jlowin/fastmcp).
 
-🚀 **Live Server**: <https://h1b-job-search-mcp.onrender.com/mcp>
+**Public endpoint:** <https://h1b-job-search-mcp.onrender.com/mcp>
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/aryaminus/h1b-job-search-mcp)
 
-Note: Due to limitation of memory on the free instance, the server tends to go down. I'm happy to accept server donations for hosting.
+> The free hosted instance has limited memory and may be unavailable. Run the
+> server locally or deploy your own instance when you need a dependable service.
 
-## ✅ Real Data, Not Samples
+## Data source
 
-This server fetches **actual H-1B application data** directly from the U.S. Department of Labor's official disclosure files. Each dataset contains tens of thousands of real H-1B applications with:
+This server fetches H-1B application data directly from the U.S. Department of
+Labor's official disclosure files. Each dataset can contain tens of thousands
+of applications, including:
 
 - Real company names (Google, Microsoft, Amazon, etc.)
 - Actual job titles and salaries
@@ -21,22 +25,22 @@ This server fetches **actual H-1B application data** directly from the U.S. Depa
 
 ## Features
 
-- 📊 **Download LCA Data**: Automatically downloads and caches H-1B LCA disclosure data from the Department of Labor
-- 🔍 **Smart Search**: Filter H-1B sponsoring companies by job role, location, and wage
-- 🏢 **Company Analytics**: Get detailed sponsorship statistics for specific companies
-- 📈 **Top Sponsors**: List top H-1B sponsoring companies by volume
-- 🚫 **Agency Filtering**: Automatically filter out staffing agencies to find direct employers
-- 📁 **Export Results**: Export filtered results to CSV for easy outreach
-- 💾 **Rolling Six-quarter Data Cache**: Warms the latest 6 fiscal quarters at startup and evicts quarters that fall outside the window
-- 🤖 **Multi-LLM Support**: Works with Claude, ChatGPT, Gemini, Cursor, and Poke
+- **LCA data:** Download and cache H-1B LCA disclosure data from the Department of Labor.
+- **Search:** Filter sponsoring employers by job role, location, and wage.
+- **Company statistics:** Review sponsorship data for a specific employer.
+- **Top sponsors:** List sponsoring employers by filing volume.
+- **Agency filtering:** Exclude staffing agencies when you want to focus on direct employers.
+- **CSV export:** Save filtered results for later review.
+- **Six-quarter cache:** Warm the latest six fiscal quarters at startup and remove older quarters.
+- **Client support:** Use the server with Claude, ChatGPT, Gemini, Cursor, and Poke.
 
-## 📖 How to Use
+## Use the server
 
 For detailed usage examples and natural language prompts, see the **[Usage Guide](USAGE_GUIDE.md)**.
 
 ### Quick Examples
 
-Just talk naturally! The `ask` tool understands plain English:
+The `ask` tool accepts plain-English requests:
 
 - "Load the latest H-1B data"
 - "Find software engineer jobs in California paying over 150k"
@@ -66,8 +70,8 @@ Search for H-1B sponsoring companies by job role and location.
   - `max_results`: Maximum results to return
   - `skip_agencies`: Skip staffing agencies (default: true)
 
-Each returned position includes `company_stats`, calculated across all loaded
-positions for that employer rather than only the filtered search results.
+Each returned position includes `company_stats`. The calculation uses all loaded
+positions for that employer, including positions outside the filtered results.
 
 ### 3. `get_company_stats`
 
@@ -110,9 +114,9 @@ Export filtered H-1B results to a CSV file.
 
 Check available LCA data periods and cached files.
 
-### 8. `ask` (Natural Language Interface) 🎯
+### 8. `ask` (plain-language interface)
 
-Talk to the H-1B search in simple English!
+Describe the search you want in ordinary English.
 
 - **Usage**: Just describe what you want in plain language
 - **Examples**:
@@ -194,11 +198,11 @@ supported when this server is run by itself.
 
 ## Deployment
 
-### Option 1: Deploy to Render
+### Option 1: Deploy on Render
 
 Click the "Deploy to Render" button above.
 
-### Option 2: Manual Deployment
+### Option 2: Deploy manually
 
 1. Fork this repository
 2. Connect your GitHub account to Render
@@ -210,9 +214,10 @@ Your server will be available at `https://your-service-name.onrender.com/mcp`
 
 Current deployment: `https://h1b-job-search-mcp.onrender.com/mcp`
 
-## Multi-LLM Support
+## Client integration
 
-This MCP server works with multiple LLM platforms. For detailed integration instructions, see [docs/LLM_INTEGRATION.md](docs/LLM_INTEGRATION.md).
+This MCP server works with several AI clients. For integration instructions,
+see [docs/LLM_INTEGRATION.md](docs/LLM_INTEGRATION.md).
 
 ### Quick Setup by Platform
 
@@ -259,7 +264,7 @@ This tool uses publicly available LCA disclosure data from the U.S. Department o
 
 **Note**: This data shows historical H-1B sponsorship patterns. Always verify current sponsorship policies with employers directly.
 
-## Privacy & Legal
+## Privacy and responsible use
 
 - All data used is publicly available from the U.S. Department of Labor
 - No private or confidential information is accessed
@@ -287,7 +292,7 @@ def custom_analysis(parameter: str) -> dict:
 
 ## Contributing
 
-Feel free to submit issues and pull requests to improve this tool!
+Open an issue or pull request if you want to improve the tool.
 
 ## License
 
