@@ -795,11 +795,21 @@ def search_h1b_jobs(
         data_manager.period_label(), data_manager.source_url,
     )
 
+_LCA_COUNT_BASIS = "fiscal_year_to_date_determinations"
+_LCA_COUNT_SCOPE = (
+    "U.S. Department of Labor LCA disclosure records are cumulative from the "
+    "start of the fiscal year through the selected quarter. Each case appears "
+    "under its most recent determination in the snapshot. Do not treat these "
+    "as standalone quarterly filings, sum snapshots, or infer sponsorship for "
+    "an individual job from them."
+)
+
+
 @mcp.tool(
     description=(
-        "Get statistics about a company's H-1B sponsorship data for one "
-        "fiscal quarter. Defaults to the latest available quarter; pass both "
-        "year and quarter to select another cached quarter from the past "
+        "Get company LCA statistics from one fiscal-year-to-date disclosure "
+        "snapshot. Defaults to the latest available snapshot; pass both "
+        "year and quarter to select another cached snapshot from the past "
         "six quarters."
     )
 )
@@ -810,7 +820,7 @@ def get_company_stats(
     quarter: Optional[int] = None,
 ) -> Dict:
     """
-    Get detailed H-1B sponsorship statistics for one fiscal quarter.
+    Get company LCA statistics for one fiscal-year-to-date snapshot.
 
     Args:
         company_name: Company name to search for
@@ -818,7 +828,7 @@ def get_company_stats(
         quarter: Optional quarter from 1 to 4. Must be provided with year.
 
     Returns:
-        Statistics including sponsorship count, job titles, wages
+        Statistics including disclosed LCA case count, job titles and wages
     """
     if (year is None) != (quarter is None):
         return {"error": "year and quarter must be provided together"}
@@ -873,8 +883,12 @@ def get_company_stats(
                 "fiscal_periods": [period_label],
                 "data_version": period_label,
                 "latest_sponsorship_period": None,
+                "count_basis": _LCA_COUNT_BASIS,
+                "count_scope": _LCA_COUNT_SCOPE,
             }
 
+        stats["count_basis"] = _LCA_COUNT_BASIS
+        stats["count_scope"] = _LCA_COUNT_SCOPE
         stats["searched_periods"] = [period_label]
         stats["latest_sponsorship_period"] = period_label
         return stats
@@ -898,13 +912,14 @@ def _company_stats_for_loaded_period(
 
 @mcp.tool(
     description=(
-        "Return quarterly H-1B filing counts for a company across the cached "
-        "six-quarter window. Use this compact series to plot sponsorship volume."
+        "Compare company LCA disclosure snapshots across the cached six-quarter "
+        "window. Values are cumulative fiscal-year-to-date case determinations, "
+        "not standalone quarterly filings. Use display_label when plotting."
     )
 )
 @serialized_data_access
 def get_company_sponsorship_trend(company_name: str) -> dict:
-    """Return newest-first quarterly filing figures for charting."""
+    """Return newest-first cumulative LCA disclosure snapshots."""
     if not data_manager.ensure_loaded():
         return {"error": "H-1B disclosure data could not be loaded."}
 
@@ -919,6 +934,8 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
     if latest_period is None:
         return {
             "company": company_name,
+            "count_basis": _LCA_COUNT_BASIS,
+            "count_scope": _LCA_COUNT_SCOPE,
             "periods": [],
             "missing_periods": [],
             "period_count": 0,
@@ -934,11 +951,14 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
                 missing_periods.append(period_label)
                 continue
 
+            display_label = f"FY{year} through Q{quarter} (cumulative)"
             stats = _company_stats_for_loaded_period(company_name, period_label)
             if stats is None:
                 periods.append(
                     {
                         "period": period_label,
+                        "display_label": display_label,
+                        "lca_case_count": 0,
                         "filing_count": 0,
                         "certified_count": 0,
                         "denied_count": 0,
@@ -950,6 +970,9 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
             periods.append(
                 {
                     "period": period_label,
+                    "display_label": display_label,
+                    "lca_case_count": stats["total_applications"],
+                    # Compatibility alias; this is not a count of quarterly filings.
                     "filing_count": stats["total_applications"],
                     "certified_count": stats.get("certified"),
                     "denied_count": stats.get("denied"),
@@ -965,6 +988,8 @@ def get_company_sponsorship_trend(company_name: str) -> dict:
 
     return {
         "company": company_name,
+        "count_basis": _LCA_COUNT_BASIS,
+        "count_scope": _LCA_COUNT_SCOPE,
         "periods": periods,
         "missing_periods": missing_periods,
         "period_count": len(periods),

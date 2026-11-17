@@ -334,9 +334,12 @@ for software engineer positions"
 
 ### Trend Analysis
 ```
-"Show me how many data scientist H-1Bs were sponsored 
-in Q1 vs Q2 vs Q3 vs Q4 of 2024"
+"Show me Google's cumulative fiscal-year-to-date LCA case counts by snapshot."
 ```
+
+Snapshot labels such as FY2025 through Q3 contain all disclosed cases through
+that quarter, not just Q3. Do not read these as quarterly hiring, visa approvals,
+or sponsorship for today's open roles.
 
 ## 📝 Quick Reference Card
 

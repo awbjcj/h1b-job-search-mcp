@@ -111,6 +111,8 @@ class H1BServerTests(unittest.TestCase):
 
         self.assertNotIn("error", result)
         self.assertEqual(result["total_applications"], 1)
+        self.assertEqual(result["count_basis"], "fiscal_year_to_date_determinations")
+        self.assertIn("standalone quarterly filings", result["count_scope"])
 
     def test_company_stats_defaults_to_latest_quarter_without_falling_back(self) -> None:
         self.cache_period(2026, 1, disclosure_rows())
@@ -261,7 +263,7 @@ class H1BServerTests(unittest.TestCase):
         self.assertFalse((Path(self._temp_dir.name) / "LCA_2025Q1.sqlite").exists())
         self.assertFalse(stale_excel.exists())
 
-    def test_company_sponsorship_trend_returns_all_cached_quarters(self) -> None:
+    def test_company_sponsorship_trend_labels_all_cached_snapshots(self) -> None:
         periods = [
             (2026, 1), (2025, 4), (2025, 3), (2025, 2),
             (2025, 1), (2024, 4),
@@ -278,9 +280,15 @@ class H1BServerTests(unittest.TestCase):
         self.assertEqual(result["period_count"], 6)
         self.assertEqual(result["window_years"], 1.5)
         self.assertEqual(result["missing_periods"], [])
+        self.assertEqual(result["count_basis"], "fiscal_year_to_date_determinations")
+        self.assertIn("standalone quarterly filings", result["count_scope"])
         self.assertEqual(result["periods"][0]["period"], "FY2026 Q1")
+        self.assertEqual(result["periods"][0]["display_label"], "FY2026 through Q1 (cumulative)")
+        self.assertEqual(result["periods"][0]["lca_case_count"], 1)
         q4 = next(row for row in result["periods"] if row["period"] == "FY2025 Q4")
-        self.assertEqual(q4["filing_count"], 2)
+        self.assertEqual(q4["display_label"], "FY2025 through Q4 (cumulative)")
+        self.assertEqual(q4["lca_case_count"], 2)
+        self.assertEqual(q4["filing_count"], q4["lca_case_count"])
         self.assertEqual(q4["certified_count"], 1)
         self.assertEqual(q4["denied_count"], 1)
 
