@@ -1,0 +1,25 @@
+name: Railway IaC checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  railway-iac:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .railway
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: .railway/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm test

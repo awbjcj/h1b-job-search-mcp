@@ -9,6 +9,8 @@ An MCP (Model Context Protocol) server that automates H-1B job searching using *
 Disclosure data is indexed on disk, with bounded query caches instead of a
 resident pandas dataset. See [memory architecture and Railway rollout](docs/memory-architecture.md)
 for measurements, migration behavior, and volume requirements.
+The [Railway IaC guide](docs/railway-iac.md) explains how to review and apply
+the service's infrastructure configuration.
 
 ## ✅ Real Data, Not Samples
 
