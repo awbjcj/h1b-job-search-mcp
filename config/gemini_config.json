@@ -82,7 +82,7 @@
     },
     {
       "name": "get_company_sponsorship_trend",
-      "description": "Get a chart-ready six-quarter H-1B filing series for a company",
+      "description": "Company LCA disclosure snapshots with fiscal-year-to-date determination counts (not standalone quarterly filings)",
       "parameters": {
         "type": "object",
         "properties": {

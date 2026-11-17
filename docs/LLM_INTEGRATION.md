@@ -23,7 +23,7 @@ All platforms have access to the same set of tools:
 - `load_h1b_data`: Download and load H-1B LCA disclosure data
 - `search_h1b_jobs`: Search for H-1B sponsoring companies
 - `get_company_stats`: Get detailed sponsorship statistics
-- `get_company_sponsorship_trend`: Get a chart-ready six-quarter filing series
+- `get_company_sponsorship_trend`: Company LCA disclosure snapshots with fiscal-year-to-date determination counts (not standalone quarterly filings)
 - `get_top_sponsors`: List top H-1B sponsors by volume
 - `export_results`: Export search results to CSV
 - `get_available_data`: Check available data periods
@@ -185,7 +185,7 @@ paths:
 
   /tool/get_company_sponsorship_trend:
     post:
-      summary: Get a six-quarter company H-1B filing series
+      summary: Company LCA disclosure snapshots with fiscal-year-to-date determination counts (not standalone quarterly filings)
       requestBody:
         required: true
         content:
@@ -199,7 +199,7 @@ paths:
                   type: string
       responses:
         200:
-          description: Newest-first quarterly filing counts for plotting
+          description: Company LCA disclosure snapshots with fiscal-year-to-date determination counts (not standalone quarterly filings)
 
   /tool/get_top_sponsors:
     post:

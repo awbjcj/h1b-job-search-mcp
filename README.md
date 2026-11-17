@@ -75,8 +75,8 @@ positions for that employer rather than only the filtered search results.
 
 ### 3. `get_company_stats`
 
-Get detailed H-1B sponsorship statistics for one quarter. With no period options,
-the latest available quarter is used.
+Get company LCA statistics for one fiscal-year-to-date disclosure snapshot.
+With no period options, the latest available snapshot is used.
 
 - **Parameters**:
   - `company_name`: Company name to analyze
@@ -85,8 +85,18 @@ the latest available quarter is used.
 
 ### 4. `get_company_sponsorship_trend`
 
-Return a compact, newest-first series of company filing counts across the cached
-six-quarter window. This is the chart-ready source for sponsorship-volume plots.
+Return newest-first company LCA disclosure snapshots across the cached
+six-quarter window. Use `lca_case_count` and `display_label` to plot **fiscal-year-to-date
+LCA case determinations**. The legacy `filing_count` and `period` fields remain
+compatible; `filing_count` is an alias for the cumulative case count. The
+`count_basis` and `count_scope` fields explain the methodology.
+
+[U.S. Department of Labor disclosure files](https://www.dol.gov/agencies/eta/foreign-labor/performance)
+are cumulative within each fiscal year, with each case represented by its latest
+determination in that snapshot. Q4 includes records from earlier quarters, and
+the cumulative period resets at Q1 of the next fiscal year. Do not add or subtract
+snapshot counts to get quarterly filings. Historical LCA records do not establish
+that a specific job is open or offers visa sponsorship.
 
 - **Parameters**:
   - `company_name`: Company name to analyze
